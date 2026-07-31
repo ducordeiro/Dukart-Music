@@ -1,0 +1,40 @@
+{
+  "name": "esporte-fai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Esporte fai desktop app for YouTube audio and video downloads.",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 ESPORTE_FAI_API_URL=https://e.duk4rt.com electron .\"",
+    "dev:local": "npm run build:electron && npm run build:server && concurrently -k \"cross-env PORT=3001 ESPORTE_FAI_DB_PATH=.dev-data/server.sqlite node dist-web-server/server/main.js\" \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:3001/api/health http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 ESPORTE_FAI_API_URL=http://127.0.0.1:3001 electron .\"",
+    "dev:web": "npm run build:web && node dist-web-server/server/main.js",
+    "start:web": "node dist-web-server/server/main.js",
+    "build": "tsc -b && vite build && npm run build:electron && npm run build:server",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:web": "vite build && npm run build:server",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.6.0",
+    "electron": "^37.10.3",
+    "express": "^5.2.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sql.js": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/sql.js": "^1.4.9",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "playwright": "^1.61.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.1"
+  }
+}
