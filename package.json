@@ -13,6 +13,8 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "build:server": "tsc -p tsconfig.server.json",
     "build:web": "vite build && npm run build:server",
+    "test": "npm run build:web && node --test tests/core.test.cjs",
+    "test:performance": "node scripts/measure-performance.cjs",
     "preview": "vite preview"
   },
   "dependencies": {

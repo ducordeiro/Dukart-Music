@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import os from "node:os";
@@ -16,12 +17,15 @@ interface YtDlpFormat {
   filesize_approx?: number;
 }
 
-function runYtDlp(args: string[]) {
+function runYtDlp(args: string[], signal?: AbortSignal) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const tool = resolveYtDlp();
     const child = spawn(tool, args, { windowsHide: true });
     let stdout = "";
     let stderr = "";
+    const abort = () => child.kill();
+    if (signal?.aborted) abort();
+    signal?.addEventListener("abort", abort, { once: true });
 
     child.stdout.on("data", (data) => {
       stdout += data.toString();
@@ -31,6 +35,11 @@ function runYtDlp(args: string[]) {
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) {
+        reject(new Error("Download cancelled by user."));
+        return;
+      }
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
@@ -40,8 +49,8 @@ function runYtDlp(args: string[]) {
   });
 }
 
-export async function readMediaInfo(url: string): Promise<MediaInfo> {
-  const { stdout } = await runYtDlp(["--dump-single-json", "--no-playlist", url]);
+export async function readMediaInfo(url: string, signal?: AbortSignal): Promise<MediaInfo> {
+  const { stdout } = await runYtDlp(["--dump-single-json", "--no-playlist", url], signal);
   const data = JSON.parse(stdout);
   const formats: YtDlpFormat[] = Array.isArray(data.formats) ? data.formats : [];
   const bestAudio = formats
@@ -87,9 +96,15 @@ export async function downloadMedia(
   type: DownloadType,
   downloadsDir: string,
   onProgress?: ProgressHandler,
-  onStarted?: (idDownload: number) => void
+  onStarted?: (idDownload: number) => void,
+  signal?: AbortSignal
 ) {
-  const info = await readMediaInfo(url);
+  const cachedInfo = db.getMediaInfoCache(url, 60 * 60 * 1000);
+  const metadataSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(45_000)])
+    : AbortSignal.timeout(45_000);
+  const info = cachedInfo || await readMediaInfo(url, metadataSignal);
+  if (!cachedInfo) db.saveMediaInfoCache(url, info);
   const idMedia = db.upsertMedia(url, info);
   const idDownload = db.createDownload(idMedia, type);
   onStarted?.(idDownload);
@@ -134,6 +149,10 @@ export async function downloadMedia(
     let finalPath = "";
     let lastEmittedProgress = -1;
     let lastPersistedProgress = -5;
+    let settled = false;
+    const abort = () => child.kill();
+    if (signal?.aborted) abort();
+    signal?.addEventListener("abort", abort, { once: true });
 
     const emit = (payload: Omit<ProgressPayload, "idDownload" | "type">) =>
       onProgress?.({ idDownload, type, ...payload });
@@ -172,12 +191,30 @@ export async function downloadMedia(
     });
 
     child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) {
+        db.cancelDownload(idDownload);
+        emit({ status: "cancelled", progress: lastEmittedProgress < 0 ? 0 : lastEmittedProgress });
+        reject(new Error("Download cancelled by user."));
+        return;
+      }
       db.failDownload(idDownload, error.message);
       emit({ status: "failed", progress: 0, message: downloadErrorMessage(error) });
       reject(error);
     });
 
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) {
+        db.cancelDownload(idDownload);
+        emit({ status: "cancelled", progress: lastEmittedProgress < 0 ? 0 : lastEmittedProgress });
+        reject(new Error("Download cancelled by user."));
+        return;
+      }
       if (code !== 0) {
         const message = errorOutput || output || `yt-dlp exited with code ${code}`;
         db.failDownload(idDownload, message);
@@ -210,10 +247,28 @@ export async function downloadMedia(
       }
 
       const mimeType = type === "audio" ? "audio/mpeg" : "video/mp4";
-      db.completeDownload(idDownload, finalPath, mimeType, stats?.size ?? null);
-      emit({ status: "completed", progress: 100 });
-      resolve({ idDownload, filePath: finalPath });
+      try {
+        const checksumSha256 = await sha256File(finalPath);
+        db.completeDownload(idDownload, finalPath, mimeType, stats?.size ?? null, checksumSha256);
+        emit({ status: "completed", progress: 100 });
+        resolve({ idDownload, filePath: finalPath });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        db.failDownload(idDownload, message);
+        emit({ status: "failed", progress: lastEmittedProgress < 0 ? 0 : lastEmittedProgress, message: downloadErrorMessage(error) });
+        reject(error);
+      }
     });
+  });
+}
+
+function sha256File(filePath: string) {
+  return new Promise<string>((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
   });
 }
 

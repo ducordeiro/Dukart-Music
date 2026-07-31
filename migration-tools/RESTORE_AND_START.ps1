@@ -10,8 +10,8 @@ $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $MigrationData = Join-Path $ProjectRoot "migration-data"
 $DbSource = Join-Path $MigrationData "database\esporte_fai.sqlite"
 $MusicSource = Join-Path $MigrationData "music"
-$DbTargetDir = Join-Path $env:APPDATA "esporte-fai"
-$DbTarget = Join-Path $DbTargetDir "esporte_fai.sqlite"
+$DbTargetDir = Join-Path $env:APPDATA "esporte-fai-server"
+$DbTarget = Join-Path $DbTargetDir "esporte_fai_central.sqlite"
 $MusicTarget = Join-Path ([Environment]::GetFolderPath("MyMusic")) "Esporte fai"
 
 Set-Location $ProjectRoot

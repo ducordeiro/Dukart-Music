@@ -11,7 +11,7 @@ $ConfigPath = Join-Path $CloudflaredDir "config.yml"
 $ServerScript = Join-Path $PSScriptRoot "START_ESPORTE_FAI_SERVER.ps1"
 $ServerTask = "Esporte Fai Server"
 $TunnelTask = "Esporte Fai Cloudflare Tunnel"
-$DatabasePath = Join-Path $env:APPDATA "esporte-fai\esporte_fai.sqlite"
+$DatabasePath = Join-Path $env:APPDATA "esporte-fai-server\esporte_fai_central.sqlite"
 $MediaDirectory = Join-Path ([Environment]::GetFolderPath("MyMusic")) "Esporte fai"
 
 function Require-Administrator {

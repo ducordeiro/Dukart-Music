@@ -1,4 +1,4 @@
-const APP_CACHE = "esporte-fai-app-v7";
+const APP_CACHE = "esporte-fai-app-v8";
 const MEDIA_CACHE = "esporte-fai-media-v1";
 const APP_SHELL = ["/", "/manifest.json", "/esporte-fai-logo.png", "/icons/icon-192.png", "/icons/icon-512.png"];
 
@@ -14,6 +14,10 @@ self.addEventListener("activate", (event) => {
       .then((keys) => Promise.all(keys.filter((key) => key.startsWith("esporte-fai-app-") && key !== APP_CACHE).map((key) => caches.delete(key))))
       .then(() => self.clients.claim())
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("fetch", (event) => {

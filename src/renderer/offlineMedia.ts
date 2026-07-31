@@ -120,7 +120,11 @@ export async function pruneMissingOfflineAudioIds(idUser: number, ids = readOffl
   return verified;
 }
 
-export async function saveTrackOffline(track: DownloadRecord, idUser: number) {
+export async function saveTrackOffline(
+  track: DownloadRecord,
+  idUser: number,
+  options: { signal?: AbortSignal; onProgress?: (receivedBytes: number, totalBytes: number) => void } = {}
+) {
   if (track.type !== "audio") {
     throw new Error("Offline no celular esta disponivel apenas para audio.");
   }
@@ -129,11 +133,39 @@ export async function saveTrackOffline(track: DownloadRecord, idUser: number) {
   }
 
   await ensureServiceWorkerReady();
-  const response = await fetch(streamUrl(track));
+  const response = await fetch(streamUrl(track), { signal: options.signal });
   if (!response.ok) throw new Error("Nao foi possivel baixar a musica para offline.");
 
+  const totalBytes = Number(response.headers.get("content-length") || track.sizeBytes || 0);
+  const expectedChecksum = response.headers.get("x-content-sha256") || track.checksumSha256 || "";
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Este navegador não permite acompanhar o download offline.");
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      receivedBytes += value.byteLength;
+      options.onProgress?.(receivedBytes, totalBytes);
+    }
+  }
+  if (totalBytes > 0 && receivedBytes !== totalBytes) throw new Error("O arquivo offline ficou incompleto.");
+  const bytes = new Uint8Array(receivedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  if (expectedChecksum && "subtle" in crypto) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const actualChecksum = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+    if (actualChecksum !== expectedChecksum) throw new Error("A verificação de integridade do arquivo offline falhou.");
+  }
+
   const cache = await caches.open(MEDIA_CACHE);
-  await cache.put(offlineUrl(track, idUser), response.clone());
+  await cache.put(offlineUrl(track, idUser), new Response(bytes, { headers: response.headers }));
 }
 
 export async function removeTrackOffline(track: DownloadRecord, idUser: number) {
@@ -141,6 +173,34 @@ export async function removeTrackOffline(track: DownloadRecord, idUser: number) 
   const cache = await caches.open(MEDIA_CACHE);
   await cache.delete(offlineUrl(track, idUser));
   removeOfflineRecord(track, idUser);
+}
+
+export async function readDeviceStorage(idUser: number) {
+  const estimate = "storage" in navigator ? await navigator.storage.estimate() : {};
+  let offlineBytes = 0;
+  let offlineFiles = 0;
+  if (supportsOfflineCache()) {
+    const cache = await caches.open(MEDIA_CACHE);
+    for (const request of await cache.keys()) {
+      if (!new URL(request.url).pathname.startsWith(`/offline-media/${idUser}/`)) continue;
+      const response = await cache.match(request);
+      if (!response) continue;
+      offlineBytes += (await response.clone().blob()).size;
+      offlineFiles += 1;
+    }
+  }
+  return { offlineBytes, offlineFiles, usage: estimate.usage || 0, quota: estimate.quota || 0 };
+}
+
+export async function clearOfflineStorage(idUser: number) {
+  if (supportsOfflineCache()) {
+    const cache = await caches.open(MEDIA_CACHE);
+    for (const request of await cache.keys()) {
+      if (new URL(request.url).pathname.startsWith(`/offline-media/${idUser}/`)) await cache.delete(request);
+    }
+  }
+  persistOfflineAudioIds([], idUser);
+  persistOfflineRecords([], idUser);
 }
 
 function scopedKey(baseKey: string, idUser: number) {

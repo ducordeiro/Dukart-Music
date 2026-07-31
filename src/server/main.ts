@@ -19,17 +19,28 @@ const app = express();
 const projectRoot = process.cwd();
 const rendererDir = path.join(projectRoot, "dist-web");
 const downloadsDir = process.env.ESPORTE_FAI_MEDIA_DIR || path.join(os.homedir(), "Music", "Esporte fai");
-const dbPath = process.env.ESPORTE_FAI_DB_PATH || path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "esporte-fai", "esporte_fai.sqlite");
+const roamingDataDir = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+const centralDataDir = path.join(roamingDataDir, "esporte-fai-server");
+const centralDatabasePath = path.join(centralDataDir, "esporte_fai_central.sqlite");
+const legacySharedDatabasePath = path.join(roamingDataDir, "esporte-fai", "esporte_fai.sqlite");
+const dbPath = process.env.ESPORTE_FAI_DB_PATH || centralDatabasePath;
 const schemaPath = path.join(projectRoot, "music_app_schema (1).sql");
 const progressByDownload = new Map<number, ProgressPayload>();
 const activeDownloads = new Set<string>();
+const activeDownloadControllers = new Map<number, AbortController>();
 const authAttempts = new Map<string, { count: number; resetAt: number }>();
 const SESSION_COOKIE = "esporte_fai_session";
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const CANONICAL_WEB_HOST = process.env.ESPORTE_FAI_CANONICAL_HOST || "e.duk4rt.com";
 const LEGACY_WEB_HOST = process.env.ESPORTE_FAI_LEGACY_HOST || "duk4rt.com";
 const FULL_HISTORY_USERNAME = normalizeUsername(process.env.ESPORTE_FAI_HISTORY_ADMIN_USERNAME || "tocagando1234");
+const MIN_FREE_BYTES = positiveEnvironmentNumber("ESPORTE_FAI_MIN_FREE_BYTES", 2 * 1024 ** 3);
+const MAX_MEDIA_BYTES = positiveEnvironmentNumber("ESPORTE_FAI_MAX_MEDIA_BYTES", 20 * 1024 ** 3);
+const MAX_DOWNLOADS_PER_USER = positiveEnvironmentNumber("ESPORTE_FAI_MAX_DOWNLOADS_PER_USER", 500);
+const RETENTION_REPORT_DAYS = positiveEnvironmentNumber("ESPORTE_FAI_RETENTION_REPORT_DAYS", 30);
+let storageReportCache: { expiresAt: number; value: ReturnType<typeof buildStorageReport> } | null = null;
 
+prepareCentralDatabaseMigration(dbPath, legacySharedDatabasePath);
 const database = new AppDatabase(dbPath, schemaPath);
 
 app.disable("x-powered-by");
@@ -62,12 +73,19 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
+  const storage = readStorageReport();
   res.json({
     ok: true,
     port: PORT,
     youtubeApiConfigured: Boolean(process.env.YOUTUBE_API_KEY),
     desktopSync: true,
-    librarySchemaVersion: 3
+    librarySchemaVersion: 3,
+    storage: {
+      warning: storage.warning,
+      mediaBytes: storage.mediaBytes,
+      freeBytes: storage.freeBytes,
+      maximumMediaBytes: storage.maximumMediaBytes
+    }
   });
 });
 
@@ -216,7 +234,14 @@ app.get("/api/media-info", async (req, res, next) => {
       res.status(400).json({ error: "Use um link válido do YouTube." });
       return;
     }
-    res.json(await readMediaInfo(url));
+    const cached = database.getMediaInfoCache(url, 60 * 60 * 1000);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+    const info = await readMediaInfo(url, AbortSignal.timeout(45_000));
+    database.saveMediaInfoCache(url, info);
+    res.json(info);
   } catch (error) {
     next(error);
   }
@@ -231,6 +256,15 @@ app.get("/api/downloads/history", (_req, res) => {
   const user = res.locals.authUser as AuthUser;
   const idUser = canViewFullHistory(user) ? undefined : user.idUser;
   res.json(database.listDownloadHistory(idUser).map(withFileAvailability));
+});
+
+app.get("/api/admin/storage", (_req, res) => {
+  const user = res.locals.authUser as AuthUser;
+  if (!canViewFullHistory(user)) {
+    res.status(403).json({ error: "Acesso administrativo necessario." });
+    return;
+  }
+  res.json(readStorageReport(true));
 });
 
 app.get("/api/musicas/buscar", async (req, res, next) => {
@@ -271,10 +305,35 @@ app.get("/api/downloads/:id/progress", (req, res) => {
   res.json(progress || (record ? withFileAvailability(record) : null));
 });
 
+app.post("/api/downloads/:id/cancel", enforceSameOrigin, (req, res) => {
+  const idDownload = Number(req.params.id);
+  const user = res.locals.authUser as AuthUser;
+  const record = database.getDownload(idDownload, user.idUser);
+  if (!record) {
+    res.status(404).json({ error: "Download não encontrado." });
+    return;
+  }
+  const controller = activeDownloadControllers.get(idDownload);
+  if (!controller) {
+    if (record.status === "cancelled") {
+      res.json(record);
+      return;
+    }
+    res.status(409).json({ error: "Este download não está mais em andamento." });
+    return;
+  }
+  controller.abort();
+  database.cancelDownload(idDownload);
+  const cancelled: ProgressPayload = { idDownload, type: record.type, status: "cancelled", progress: record.progress || 0 };
+  progressByDownload.set(idDownload, cancelled);
+  res.status(202).json(cancelled);
+});
+
 app.post("/api/downloads", async (req, res, next) => {
   let downloadKey = "";
   let trackedDownloadId = 0;
   let responseStarted = false;
+  const controller = new AbortController();
   try {
     const { url, type } = req.body as { url?: string; type?: DownloadType };
     if (!url || !isSupportedYoutubeUrl(url) || !isDownloadType(type)) {
@@ -286,6 +345,15 @@ app.post("/api/downloads", async (req, res, next) => {
     if (reusableDownload && isFileAvailable(reusableDownload)) {
       database.linkDownloadToUser(user.idUser, reusableDownload.idDownload);
       res.json(withFileAvailability(reusableDownload));
+      return;
+    }
+    const storage = readStorageReport(true);
+    if (storage.freeBytes < MIN_FREE_BYTES || storage.mediaBytes >= MAX_MEDIA_BYTES) {
+      res.status(507).json({ error: "O servidor atingiu o limite seguro de armazenamento. Avise o administrador." });
+      return;
+    }
+    if (database.listDownloadHistory(user.idUser).length >= MAX_DOWNLOADS_PER_USER) {
+      res.status(429).json({ error: "Esta conta atingiu o limite de downloads armazenados." });
       return;
     }
     downloadKey = `${youtubeVideoId(url)}:${type}`;
@@ -306,13 +374,16 @@ app.post("/api/downloads", async (req, res, next) => {
       downloadsDir,
       (payload) => {
         progressByDownload.set(payload.idDownload, payload);
+        if (payload.status === "completed") storageReportCache = null;
       },
       (idDownload) => {
         trackedDownloadId = idDownload;
+        activeDownloadControllers.set(idDownload, controller);
         database.linkDownloadToUser(user.idUser, idDownload);
         responseStarted = true;
         res.status(202).json({ idDownload });
-      }
+      },
+      controller.signal
     );
 
     if (!responseStarted) res.json(result);
@@ -323,7 +394,11 @@ app.post("/api/downloads", async (req, res, next) => {
     }
   } finally {
     if (downloadKey) activeDownloads.delete(downloadKey);
-    if (trackedDownloadId) progressByDownload.delete(trackedDownloadId);
+    if (trackedDownloadId) activeDownloadControllers.delete(trackedDownloadId);
+    if (trackedDownloadId) {
+      const cleanupTimer = setTimeout(() => progressByDownload.delete(trackedDownloadId), 5 * 60 * 1000);
+      cleanupTimer.unref();
+    }
   }
 });
 
@@ -353,6 +428,10 @@ app.get("/api/files/:id/stream", (req, res) => {
   res.setHeader("Content-Type", contentType);
   res.setHeader("Content-Disposition", contentDispositionInline(record.fileName || path.basename(record.filePath)));
   res.setHeader("Accept-Ranges", "bytes");
+  if (record.checksumSha256) {
+    res.setHeader("ETag", `"sha256-${record.checksumSha256}"`);
+    res.setHeader("X-Content-SHA256", record.checksumSha256);
+  }
 
   if (range) {
     const parsedRange = parseByteRange(range, stat.size);
@@ -378,7 +457,11 @@ app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Endpoint não encontrado." });
 });
 
-app.use(express.static(rendererDir));
+app.get("/sw.js", (_req, res) => {
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.sendFile(path.join(rendererDir, "sw.js"));
+});
+app.use(express.static(rendererDir, { etag: true, maxAge: "1h" }));
 app.use((req, res) => {
   if (path.extname(req.path)) {
     res.status(404).type("text/plain").send("Arquivo não encontrado.");
@@ -411,8 +494,80 @@ function isDownloadType(value: unknown): value is DownloadType {
   return value === "audio" || value === "video";
 }
 
+function prepareCentralDatabaseMigration(targetPath: string, legacyPath: string) {
+  if (path.resolve(targetPath) !== path.resolve(centralDatabasePath) || fs.existsSync(targetPath) || !fs.existsSync(legacyPath)) {
+    return;
+  }
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const migrationBackup = `${targetPath}.migration-backup`;
+  if (!fs.existsSync(migrationBackup)) {
+    fs.copyFileSync(legacyPath, migrationBackup, fs.constants.COPYFILE_EXCL);
+  }
+  fs.copyFileSync(migrationBackup, targetPath, fs.constants.COPYFILE_EXCL);
+  console.log(`Central database migrated by copy from ${legacyPath}`);
+}
+
 function canViewFullHistory(user: AuthUser) {
   return normalizeUsername(user.username) === FULL_HISTORY_USERNAME;
+}
+
+function positiveEnvironmentNumber(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function readStorageReport(force = false) {
+  if (!force && storageReportCache && storageReportCache.expiresAt > Date.now()) return storageReportCache.value;
+  const value = buildStorageReport();
+  storageReportCache = { expiresAt: Date.now() + 30_000, value };
+  return value;
+}
+
+function buildStorageReport() {
+  fs.mkdirSync(downloadsDir, { recursive: true });
+  const files = fs
+    .readdirSync(downloadsDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .flatMap((entry) => {
+      try {
+        const filePath = path.join(downloadsDir, entry.name);
+        const stat = fs.statSync(filePath);
+        return [{ fileName: entry.name, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString() }];
+      } catch {
+        return [];
+      }
+    });
+  const mediaBytes = files.reduce((total, file) => total + file.sizeBytes, 0);
+  const fileSystem = fs.statfsSync(downloadsDir);
+  const freeBytes = Number(fileSystem.bavail) * Number(fileSystem.bsize);
+  const retentionCutoff = Date.now() - RETENTION_REPORT_DAYS * 24 * 60 * 60 * 1000;
+  const retentionCandidates = database
+    .listDownloads()
+    .filter((record) => {
+      const timestamp = Date.parse(record.completedAt || record.createdAt);
+      return (record.status === "failed" || record.status === "cancelled" || !record.filePath) && timestamp < retentionCutoff;
+    })
+    .map((record) => ({
+      idDownload: record.idDownload,
+      title: record.title,
+      status: record.status,
+      createdAt: record.createdAt,
+      reason: record.filePath ? "tarefa antiga sem conclusao" : "arquivo ausente"
+    }));
+
+  return {
+    mediaDirectory: downloadsDir,
+    fileCount: files.length,
+    mediaBytes,
+    freeBytes,
+    minimumFreeBytes: MIN_FREE_BYTES,
+    maximumMediaBytes: MAX_MEDIA_BYTES,
+    maximumDownloadsPerUser: MAX_DOWNLOADS_PER_USER,
+    retentionReportDays: RETENTION_REPORT_DAYS,
+    warning: freeBytes < MIN_FREE_BYTES || mediaBytes >= MAX_MEDIA_BYTES,
+    retentionMode: "report-only" as const,
+    retentionCandidates
+  };
 }
 
 function isFileAvailable(record: DownloadRecord) {

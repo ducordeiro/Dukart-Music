@@ -10,7 +10,7 @@ New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 Set-Location $projectRoot
 
 $env:ESPORTE_FAI_MEDIA_DIR = Join-Path ([Environment]::GetFolderPath("MyMusic")) "Esporte fai"
-$env:ESPORTE_FAI_DB_PATH = Join-Path $env:APPDATA "esporte-fai\esporte_fai.sqlite"
+$env:ESPORTE_FAI_DB_PATH = Join-Path $env:APPDATA "esporte-fai-server\esporte_fai_central.sqlite"
 $env:ESPORTE_FAI_YTDLP_PATH = Join-Path $winGetLinks "yt-dlp.exe"
 $env:ESPORTE_FAI_FFMPEG_PATH = Join-Path $winGetLinks "ffmpeg.exe"
 $env:ESPORTE_FAI_FFPROBE_PATH = Join-Path $winGetLinks "ffprobe.exe"

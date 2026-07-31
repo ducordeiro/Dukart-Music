@@ -2838,3 +2838,198 @@ input:focus-visible,
     transition-duration: 0.01ms !important;
   }
 }
+
+.music-result-card {
+  grid-template-columns: 74px minmax(0, 1fr) auto;
+}
+
+.music-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.play-result-button,
+.local-suggestion {
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.play-result-button {
+  min-height: 36px;
+  padding: 0 11px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.local-suggestions {
+  margin: 10px 0 18px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.local-suggestions > small {
+  width: 100%;
+  color: var(--muted);
+}
+
+.local-suggestion {
+  min-height: 34px;
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.local-suggestion span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-sheet {
+  max-height: min(78vh, 680px);
+}
+
+.queue-list {
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+}
+
+.queue-row.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-1));
+}
+
+.queue-track {
+  min-width: 0;
+  padding: 9px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  text-align: left;
+  color: inherit;
+}
+
+.queue-track > span:last-child {
+  min-width: 0;
+  display: grid;
+}
+
+.queue-track strong,
+.queue-track small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-track small {
+  color: var(--muted);
+}
+
+.queue-actions {
+  display: flex;
+  padding-right: 5px;
+}
+
+.queue-actions .icon-button {
+  width: 32px;
+  height: 32px;
+}
+
+.queue-clear {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.storage-panel {
+  margin: -8px 0 14px;
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--muted);
+}
+
+.storage-panel .plain-button {
+  margin-top: 4px;
+}
+
+.download-manager {
+  margin-top: 20px;
+  display: grid;
+  gap: 8px;
+}
+
+.download-manager h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.download-task {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(70px, 0.6fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+}
+
+.download-task > div {
+  min-width: 0;
+  display: grid;
+}
+
+.download-task strong,
+.download-task small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-task small { color: var(--muted); }
+.download-task progress { width: 100%; accent-color: var(--accent); }
+
+@media (max-width: 560px) {
+  .music-result-card {
+    grid-template-columns: 60px minmax(0, 1fr) auto;
+  }
+
+  .music-result-actions {
+    flex-direction: column;
+  }
+
+  .play-result-button,
+  .select-result-button {
+    width: 38px;
+    min-height: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .play-result-button span {
+    display: none;
+  }
+}

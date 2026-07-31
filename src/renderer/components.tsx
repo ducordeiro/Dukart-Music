@@ -28,9 +28,26 @@ import {
   Video,
   X
 } from "lucide-react";
-import type { DownloadRecord, DownloadType, UserPlaylistTrack, YoutubeSearchResult } from "../shared/types";
+import type { DownloadRecord, DownloadStatus, DownloadType, UserPlaylistTrack, YoutubeSearchResult } from "../shared/types";
 import type { Status, UserPlaylist } from "./types";
 import { formatDateTime, formatMb, formatTime } from "./utils";
+import { clearOfflineStorage, readDeviceStorage } from "./offlineMedia";
+
+function useDialogDismiss(close: () => void) {
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previous?.focus();
+    };
+  }, []);
+}
 
 function HomeView({
   username,
@@ -138,12 +155,16 @@ function SearchView({
   selectedMusic,
   runMusicSearch,
   selectMusic,
+  playResult,
   canPlayLatest,
   audioSize,
   videoSize,
   status,
   progress,
   message,
+  downloadTasks,
+  cancelDownload,
+  retryDownload,
   startDownload,
   playLatest,
   cancelSearch,
@@ -161,12 +182,16 @@ function SearchView({
   selectedMusic: YoutubeSearchResult | null;
   runMusicSearch: () => void;
   selectMusic: (result: YoutubeSearchResult) => void;
+  playResult: (result: YoutubeSearchResult) => void;
   canPlayLatest: boolean;
   audioSize: number | null;
   videoSize: number | null;
   status: Record<DownloadType | "play", Status>;
   progress: Record<DownloadType, number>;
   message: string;
+  downloadTasks: Array<{ idDownload: number; url: string; title: string; type: DownloadType; status: DownloadStatus; progress: number; message?: string }>;
+  cancelDownload: (task: { idDownload: number; url: string; title: string; type: DownloadType; status: DownloadStatus; progress: number; message?: string }) => void;
+  retryDownload: (task: { idDownload: number; url: string; title: string; type: DownloadType; status: DownloadStatus; progress: number; message?: string }) => void;
   startDownload: (type: DownloadType) => void;
   playLatest: () => void;
   cancelSearch: () => void;
@@ -174,6 +199,9 @@ function SearchView({
 }) {
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const localSuggestions = musicSearch.trim() && !validUrl
+    ? recentSearches.filter((result) => `${result.titulo} ${result.canal}`.toLowerCase().includes(musicSearch.trim().toLowerCase()))
+    : [];
 
   useEffect(() => {
     searchInputRef.current?.focus();
@@ -209,11 +237,11 @@ function SearchView({
                   runMusicSearch();
                 }
               }}
-              placeholder="O que você quer ouvir?"
+              placeholder="Busque uma música ou cole um link do YouTube"
               disabled={musicSearchLoading}
             />
           </div>
-          <button className="music-search-submit pressable" type="button" onClick={runMusicSearch} disabled={musicSearchLoading}>
+          <button className="music-search-submit pressable" type="button" onClick={runMusicSearch} disabled={musicSearchLoading} aria-label="Buscar ou reconhecer link">
             {musicSearchLoading ? (
               <Loader2 className="spin" size={18} />
             ) : (
@@ -273,15 +301,33 @@ function SearchView({
                     <strong title={result.titulo}>{result.titulo}</strong>
                     <span>{result.canal}</span>
                   </div>
-                  <button className="select-result-button pressable" type="button" onClick={() => selectMusic(result)}>
-                    {selected ? <Check size={17} /> : "Selecionar"}
-                  </button>
+                  <div className="music-result-actions">
+                    <button className="select-result-button pressable" type="button" onClick={() => selectMusic(result)}>
+                      {selected ? <Check size={17} /> : "Selecionar"}
+                    </button>
+                    <button className="play-result-button pressable" type="button" onClick={() => playResult(result)} aria-label={`Tocar ${result.titulo}`}>
+                      <Play size={16} fill="currentColor" />
+                      <span>Tocar</span>
+                    </button>
+                  </div>
                 </article>
               );
             })}
           </div>
         )}
       </div>
+
+      {musicSearch.trim() && !musicSearchLoading && musicResults.length === 0 && localSuggestions.length > 0 && (
+        <div className="local-suggestions" aria-label="Sugestões do histórico">
+          <small>Sugestões recentes</small>
+          {localSuggestions.map((result) => (
+            <button key={result.videoId} className="local-suggestion pressable" type="button" onClick={() => selectMusic(result)}>
+              <History size={15} />
+              <span>{result.titulo}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {!musicSearch.trim() && !musicSearchLoading && (
         <section className="recent-searches" aria-labelledby="recent-searches-title">
@@ -311,7 +357,7 @@ function SearchView({
               <Search size={20} />
               <div>
                 <strong>Nenhuma busca recente</strong>
-                <span>As músicas que você selecionar nesta sessão aparecerão aqui.</span>
+                <span>As músicas selecionadas ficam salvas somente neste aparelho e nesta conta.</span>
               </div>
             </div>
           )}
@@ -319,23 +365,9 @@ function SearchView({
       )}
 
       <div className="download-section-heading">
-        <span className="section-eyebrow">Download direto</span>
-        <h2>Baixar por link</h2>
+        <span className="section-eyebrow">{validUrl ? "Link pronto" : "Ações"}</span>
+        <h2>{selectedMusic?.titulo || (validUrl ? "Escolha o formato" : "Selecione uma música acima")}</h2>
       </div>
-
-      <div className="input-group">
-        <label className="sr-only" htmlFor="url-input">
-          URL
-        </label>
-        <input
-          id="url-input"
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          placeholder="URL: www.test/123/abc...."
-          aria-invalid={url.length > 0 && !validUrl}
-        />
-      </div>
-      <p className={`validation ${url && !validUrl ? "visible" : ""}`}>Enter a valid URL.</p>
 
       <div className="actions">
         <ActionRow
@@ -374,6 +406,23 @@ function SearchView({
       <div className="message" role="status">
         {message}
       </div>
+
+      {downloadTasks.length > 0 && (
+        <section className="download-manager" aria-labelledby="download-manager-title">
+          <h2 id="download-manager-title">Downloads</h2>
+          {downloadTasks.map((task) => (
+            <div className="download-task" key={task.idDownload}>
+              <div><strong>{task.title}</strong><small>{task.type === "audio" ? "Áudio" : "Vídeo"} · {task.status}</small></div>
+              <progress max="100" value={task.progress} aria-label={`Progresso de ${task.title}`} />
+              {task.status === "downloading" || task.status === "pending" ? (
+                <button className="plain-button pressable" type="button" onClick={() => cancelDownload(task)}>Cancelar</button>
+              ) : task.status === "failed" || task.status === "cancelled" ? (
+                <button className="plain-button pressable" type="button" onClick={() => retryDownload(task)}>Tentar novamente</button>
+              ) : <Check size={18} aria-label="Concluído" />}
+            </div>
+          ))}
+        </section>
+      )}
     </section>
   );
 }
@@ -612,7 +661,7 @@ function PlaylistDetailView({
   offlineBusyId: number | null;
   offlinePlaylistBusy: boolean;
   offlinePlaylistComplete: boolean;
-  offlinePlaylistProgress: { mode: "saving" | "removing"; completed: number; total: number } | null;
+  offlinePlaylistProgress: { mode: "saving" | "removing"; completed: number; total: number; receivedBytes?: number; totalBytes?: number } | null;
   offlinePlaylistTotal: number;
   offlineSupported: boolean;
   togglePlaylistOffline: () => void;
@@ -625,7 +674,7 @@ function PlaylistDetailView({
   return (
     <section className="playlist-detail">
       <div className="screen-topbar">
-        <button className="icon-button pressable" onClick={back} title="Voltar">
+        <button className="icon-button pressable" onClick={back} title="Voltar" aria-label="Voltar">
           <ArrowLeft size={22} />
         </button>
         <h2>{playlist.name}</h2>
@@ -644,7 +693,7 @@ function PlaylistDetailView({
             className={`playlist-offline-button pressable ${offlinePlaylistComplete ? "saved" : ""}`}
             type="button"
             onClick={togglePlaylistOffline}
-            disabled={!offlineSupported || !offlinePlaylistTotal || offlinePlaylistBusy}
+            disabled={!offlineSupported || !offlinePlaylistTotal || offlinePlaylistProgress?.mode === "removing"}
             aria-pressed={offlinePlaylistComplete}
             title={
               !offlineSupported
@@ -657,7 +706,7 @@ function PlaylistDetailView({
             }
           >
             {offlinePlaylistBusy ? (
-              <Loader2 className="spin" size={18} />
+              <X size={18} />
             ) : offlinePlaylistComplete ? (
               <Check size={18} />
             ) : (
@@ -665,7 +714,7 @@ function PlaylistDetailView({
             )}
             <span>
               {offlinePlaylistProgress
-                ? `${offlinePlaylistProgress.mode === "saving" ? "Baixando" : "Removendo"} ${offlinePlaylistProgress.completed}/${offlinePlaylistProgress.total}`
+                ? `${offlinePlaylistProgress.mode === "saving" ? "Baixando" : "Removendo"} ${offlinePlaylistProgress.completed}/${offlinePlaylistProgress.total}${offlinePlaylistProgress.receivedBytes ? ` · ${formatMb(offlinePlaylistProgress.receivedBytes)}` : ""}`
                 : offlinePlaylistComplete
                   ? "Offline"
                   : "Baixar"}
@@ -695,7 +744,7 @@ function PlaylistDetailView({
               const offlineSaved = offlineAudioIds.includes(track.idDownload);
               const offlineBusy = offlineBusyId === track.idDownload;
               return (
-                <div className={`track-row pressable ${currentTrack?.idDownload === track.idDownload ? "active" : ""}`} key={track.idDownload} onClick={() => playTrack(track)} role="button" tabIndex={0}>
+                <div className={`track-row pressable ${currentTrack?.idDownload === track.idDownload ? "active" : ""}`} key={track.idDownload} onClick={() => playTrack(track)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); playTrack(track); } }} role="button" tabIndex={0} aria-label={`Tocar ${track.title}`}>
                   <div className="track-art">{currentTrack?.idDownload === track.idDownload ? <AudioBars /> : <Headphones size={20} />}</div>
                   <div>
                     <strong>{track.title}</strong>
@@ -761,6 +810,7 @@ function PlayerView({
   seek,
   toggleFavorite,
   openAddSheet,
+  openQueue,
   toggleRepeat,
   isOfflineSaved,
   offlineBusy,
@@ -790,6 +840,7 @@ function PlayerView({
   seek: (value: number) => void;
   toggleFavorite: () => void;
   openAddSheet: () => void;
+  openQueue: () => void;
   toggleRepeat: () => void;
   isOfflineSaved: boolean;
   offlineBusy: boolean;
@@ -820,7 +871,7 @@ function PlayerView({
   return (
     <section className="player-view">
       <div className="player-topbar">
-        <button className="icon-button pressable" onClick={back} title="Voltar">
+        <button className="icon-button pressable" onClick={back} title="Voltar" aria-label="Voltar">
           <ArrowLeft size={24} />
         </button>
         <span>Tocando agora</span>
@@ -883,6 +934,7 @@ function PlayerView({
         </div>
         <input
           className="seek-slider"
+          aria-label="Posição da reprodução"
           type="range"
           min="0"
           max={duration || 0}
@@ -906,8 +958,8 @@ function PlayerView({
         <button className="icon-button large pressable" onClick={nextTrack} disabled={!track} title="Proxima">
           <SkipForward fill="currentColor" size={28} />
         </button>
-        <button className="icon-button secondary pressable" onClick={openAddSheet} disabled={!track} title="Adicionar">
-          <Plus size={23} />
+        <button className="icon-button secondary pressable" onClick={openQueue} disabled={!track} title="Abrir fila" aria-label="Abrir fila de reprodução">
+          <ListMusic size={23} />
         </button>
       </div>
     </section>
@@ -970,6 +1022,7 @@ function BottomNavigation({ activeView, navigate }: { activeView: "main" | "sear
 }
 
 function SettingsView({
+  idUser,
   username,
   downloads,
   historyLoaded,
@@ -990,6 +1043,7 @@ function SettingsView({
   fileDownloadBusyId,
   logout
 }: {
+  idUser: number;
   username: string;
   downloads: DownloadRecord[];
   historyLoaded: boolean;
@@ -1012,6 +1066,17 @@ function SettingsView({
 }) {
   const completed = downloads.filter((item) => item.status === "completed");
   const [logoutBusy, setLogoutBusy] = useState(false);
+  const [deviceStorage, setDeviceStorage] = useState<{ offlineBytes: number; offlineFiles: number; usage: number; quota: number } | null>(null);
+  const [storageBusy, setStorageBusy] = useState(false);
+
+  async function loadDeviceStorage() {
+    setStorageBusy(true);
+    try {
+      setDeviceStorage(await readDeviceStorage(idUser));
+    } finally {
+      setStorageBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!installHelp) return;
@@ -1032,7 +1097,7 @@ function SettingsView({
   return (
     <section className="settings-view">
       <div className="screen-topbar">
-        <button className="icon-button pressable" onClick={openMain} title="Voltar">
+        <button className="icon-button pressable" onClick={openMain} title="Voltar" aria-label="Voltar">
           <ArrowLeft size={22} />
         </button>
         <h2>Configurações</h2>
@@ -1071,6 +1136,27 @@ function SettingsView({
           {logoutBusy ? "Saindo..." : "Sair"}
         </button>
       </div>
+
+      <button className="settings-option pressable" type="button" onClick={loadDeviceStorage} disabled={storageBusy}>
+        <span className="settings-option-icon"><Download size={23} /></span>
+        <span>
+          <strong>Armazenamento neste aparelho</strong>
+          <small>{deviceStorage ? `${formatMb(deviceStorage.offlineBytes)} em ${deviceStorage.offlineFiles} arquivos offline` : "Ver uso, cota e arquivos offline"}</small>
+        </span>
+        {storageBusy ? <Loader2 className="spin" size={19} /> : <span className="theme-status">VER</span>}
+      </button>
+
+      {deviceStorage && (
+        <div className="storage-panel">
+          <span>Uso do site: <strong>{formatMb(deviceStorage.usage)}</strong></span>
+          <span>Cota estimada: <strong>{formatMb(deviceStorage.quota)}</strong></span>
+          <button className="plain-button pressable" type="button" disabled={!deviceStorage.offlineFiles} onClick={async () => {
+            if (!window.confirm("Remover todas as músicas offline desta conta neste aparelho?")) return;
+            await clearOfflineStorage(idUser);
+            await loadDeviceStorage();
+          }}>Remover todos os arquivos offline</button>
+        </div>
+      )}
 
       <button
         className="settings-option install-option pressable"
@@ -1274,12 +1360,13 @@ function BottomSheet({
   confirm: () => void;
   createNew: () => void;
 }) {
+  useDialogDismiss(close);
   return (
-    <div className="overlay">
-      <section className="bottom-sheet">
+    <div className="overlay" onClick={close}>
+      <section className="bottom-sheet" role="dialog" aria-modal="true" aria-labelledby="add-playlist-title" onClick={(event) => event.stopPropagation()}>
         <div className="sheet-header">
-          <strong>Adicionar a playlist</strong>
-          <button className="icon-button pressable" onClick={close}>
+          <strong id="add-playlist-title">Adicionar a playlist</strong>
+          <button className="icon-button pressable" onClick={close} aria-label="Fechar">
             <X size={20} />
           </button>
         </div>
@@ -1323,10 +1410,11 @@ function Modal({
   close: () => void;
   confirm: () => void;
 }) {
+  useDialogDismiss(close);
   return (
-    <div className="overlay centered">
-      <section className="modal">
-        <strong>{title}</strong>
+    <div className="overlay centered" onClick={close}>
+      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" onClick={(event) => event.stopPropagation()}>
+        <strong id="modal-title">{title}</strong>
         <label>
           Nome
           <input value={value} onChange={(event) => setValue(event.target.value)} autoFocus />
@@ -1339,6 +1427,52 @@ function Modal({
             Criar
           </button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function QueueSheet({
+  queue,
+  currentTrackId,
+  close,
+  play,
+  move,
+  remove,
+  clear
+}: {
+  queue: DownloadRecord[];
+  currentTrackId?: number;
+  close: () => void;
+  play: (index: number) => void;
+  move: (index: number, direction: -1 | 1) => void;
+  remove: (index: number) => void;
+  clear: () => void;
+}) {
+  useDialogDismiss(close);
+  return (
+    <div className="overlay" onClick={close}>
+      <section className="bottom-sheet queue-sheet" role="dialog" aria-modal="true" aria-labelledby="queue-title" onClick={(event) => event.stopPropagation()}>
+        <div className="sheet-header">
+          <strong id="queue-title">Fila de reprodução</strong>
+          <button className="icon-button pressable" type="button" onClick={close} aria-label="Fechar fila"><X size={20} /></button>
+        </div>
+        <div className="queue-list">
+          {queue.length ? queue.map((track, index) => (
+            <div className={`queue-row ${track.idDownload === currentTrackId ? "active" : ""}`} key={`${track.idDownload}-${index}`}>
+              <button className="queue-track pressable" type="button" onClick={() => play(index)}>
+                <span>{index + 1}</span>
+                <span><strong>{track.title}</strong><small>{track.channel || "Esporte Fai"}</small></span>
+              </button>
+              <div className="queue-actions">
+                <button type="button" className="icon-button pressable" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Mover ${track.title} para cima`}><ChevronUp size={17} /></button>
+                <button type="button" className="icon-button pressable" onClick={() => move(index, 1)} disabled={index === queue.length - 1} aria-label={`Mover ${track.title} para baixo`}><ChevronDown size={17} /></button>
+                <button type="button" className="icon-button pressable" onClick={() => remove(index)} aria-label={`Remover ${track.title} da fila`}><X size={17} /></button>
+              </div>
+            </div>
+          )) : <div className="empty-state"><ListMusic size={24} /><strong>A fila está vazia</strong></div>}
+        </div>
+        {queue.length > 0 && <button className="plain-button queue-clear pressable" type="button" onClick={clear}>Limpar fila</button>}
       </section>
     </div>
   );
@@ -1362,4 +1496,4 @@ function MusicGlyph() {
   );
 }
 
-export { HomeView, SearchView, PlaylistsView, PlaylistDetailView, PlayerView, PlayerReturnTab, BottomNavigation, SettingsView, BottomSheet, Modal };
+export { HomeView, SearchView, PlaylistsView, PlaylistDetailView, PlayerView, PlayerReturnTab, BottomNavigation, SettingsView, BottomSheet, Modal, QueueSheet };

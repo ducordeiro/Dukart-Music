@@ -22,6 +22,7 @@ export interface DownloadRecord {
   filePath: string | null;
   fileName: string | null;
   sizeBytes: number | null;
+  checksumSha256?: string | null;
   createdAt: string;
   completedAt: string | null;
   errorMessage: string | null;

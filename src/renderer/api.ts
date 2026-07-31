@@ -12,7 +12,8 @@ import type {
 } from "../shared/types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const timeoutMs = url === "/api/downloads" ? 60_000 : 20_000;
+  const response = await fetch(url, { ...init, signal: init?.signal || AbortSignal.timeout(timeoutMs) });
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
@@ -79,7 +80,8 @@ export const api = {
     const response = await fetch("/api/library", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playlists, revision })
+      body: JSON.stringify({ playlists, revision }),
+      signal: AbortSignal.timeout(20_000)
     });
     const contentType = response.headers.get("content-type") || "";
     const body = contentType.includes("application/json") ? await response.json() : await response.text();
@@ -134,6 +136,10 @@ export const api = {
   getDownloadProgress(idDownload: number): Promise<ProgressPayload | DownloadRecord | null> {
     if (window.esporteFai) return Promise.resolve(null);
     return request(`/api/downloads/${idDownload}/progress`);
+  },
+  cancelDownload(idDownload: number): Promise<boolean | ProgressPayload> {
+    if (window.esporteFai) return window.esporteFai.cancelDownload(idDownload);
+    return request(`/api/downloads/${idDownload}/cancel`, { method: "POST" });
   },
   playExternal(record: DownloadRecord | string): Promise<boolean> {
     if (window.esporteFai) {

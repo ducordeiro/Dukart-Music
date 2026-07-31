@@ -30,6 +30,7 @@ export class AppDatabase {
   private SQL: SqlJsStatic | null = null;
   private db: Database | null = null;
   private saveSequence = 0;
+  private lastBackupAt = 0;
 
   constructor(
     private readonly dbPath: string,
@@ -43,7 +44,7 @@ export class AppDatabase {
 
     this.recoverInterruptedSave();
     if (fs.existsSync(this.dbPath)) {
-      this.db = new this.SQL.Database(fs.readFileSync(this.dbPath));
+      this.db = this.openValidatedDatabase(this.dbPath);
     } else {
       this.db = new this.SQL.Database();
       const schema = fs.readFileSync(this.schemaPath, "utf8");
@@ -56,6 +57,7 @@ export class AppDatabase {
     this.ensureUserLibrarySchema();
     this.ensureUserDownloadSchema();
     this.ensureYoutubeSearchCache();
+    this.ensureMediaInfoCache();
     this.markInterruptedDownloads();
   }
 
@@ -244,7 +246,7 @@ export class AppDatabase {
     this.save();
   }
 
-  completeDownload(idDownload: number, filePath: string, mimeType: string | null, sizeBytes: number | null) {
+  completeDownload(idDownload: number, filePath: string, mimeType: string | null, sizeBytes: number | null, checksumSha256?: string | null) {
     const db = this.requireDb();
     const fileName = path.basename(filePath);
     const fileExtension = path.extname(filePath).replace(".", "").toLowerCase() || "file";
@@ -256,9 +258,9 @@ export class AppDatabase {
     );
     db.run(
       `INSERT OR REPLACE INTO local_file
-       (id_download, file_path, file_name, file_extension, mime_type, size_bytes)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [idDownload, filePath, fileName, fileExtension, mimeType, sizeBytes]
+       (id_download, file_path, file_name, file_extension, mime_type, size_bytes, checksum_sha256)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [idDownload, filePath, fileName, fileExtension, mimeType, sizeBytes, checksumSha256 ?? null]
     );
     this.save();
   }
@@ -269,6 +271,16 @@ export class AppDatabase {
        SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP
        WHERE id_download = ?`,
       [message, idDownload]
+    );
+    this.save();
+  }
+
+  cancelDownload(idDownload: number) {
+    this.requireDb().run(
+      `UPDATE download
+       SET status = 'cancelled', error_message = NULL, completed_at = CURRENT_TIMESTAMP
+       WHERE id_download = ? AND status IN ('pending', 'downloading')`,
+      [idDownload]
     );
     this.save();
   }
@@ -302,7 +314,7 @@ export class AppDatabase {
       `SELECT d.id_download AS idDownload, m.source_url AS url, COALESCE(m.title, 'Untitled media') AS title,
               COALESCE(m.channel_name, '') AS channel, d.requested_type AS type, d.status,
               d.progress_percent AS progress, lf.file_path AS filePath, lf.file_name AS fileName,
-              lf.size_bytes AS sizeBytes, d.created_at AS createdAt, d.completed_at AS completedAt,
+              lf.size_bytes AS sizeBytes, lf.checksum_sha256 AS checksumSha256, d.created_at AS createdAt, d.completed_at AS completedAt,
               d.error_message AS errorMessage
        FROM download d
        JOIN media_source m ON m.id_media = d.id_media
@@ -342,7 +354,7 @@ export class AppDatabase {
       `SELECT d.id_download AS idDownload, m.source_url AS url, COALESCE(m.title, 'Untitled media') AS title,
               COALESCE(m.channel_name, '') AS channel, d.requested_type AS type, d.status,
               d.progress_percent AS progress, lf.file_path AS filePath, lf.file_name AS fileName,
-              lf.size_bytes AS sizeBytes, d.created_at AS createdAt, d.completed_at AS completedAt,
+              lf.size_bytes AS sizeBytes, lf.checksum_sha256 AS checksumSha256, d.created_at AS createdAt, d.completed_at AS completedAt,
               d.error_message AS errorMessage
        FROM download d
        JOIN media_source m ON m.id_media = d.id_media
@@ -382,7 +394,7 @@ export class AppDatabase {
       `SELECT d.id_download AS idDownload, m.source_url AS url, COALESCE(m.title, 'Untitled media') AS title,
               COALESCE(m.channel_name, '') AS channel, d.requested_type AS type, d.status,
               d.progress_percent AS progress, lf.file_path AS filePath, lf.file_name AS fileName,
-              lf.size_bytes AS sizeBytes, d.created_at AS createdAt, d.completed_at AS completedAt,
+              lf.size_bytes AS sizeBytes, lf.checksum_sha256 AS checksumSha256, d.created_at AS createdAt, d.completed_at AS completedAt,
               d.error_message AS errorMessage
        FROM download d
        JOIN media_source m ON m.id_media = d.id_media
@@ -440,6 +452,33 @@ export class AppDatabase {
     this.save();
   }
 
+  getMediaInfoCache(url: string, maxAgeMs: number) {
+    const cached = this.getOne<{ infoJson: string; updatedAt: string }>(
+      `SELECT info_json AS infoJson, updated_at AS updatedAt
+       FROM media_info_cache
+       WHERE source_key = ?
+       LIMIT 1`,
+      [youtubeVideoId(url) || url]
+    );
+    if (!cached || Date.now() - Date.parse(cached.updatedAt) > maxAgeMs) return null;
+    try {
+      return JSON.parse(cached.infoJson) as MediaInfo;
+    } catch {
+      return null;
+    }
+  }
+
+  saveMediaInfoCache(url: string, info: MediaInfo) {
+    const now = new Date().toISOString();
+    this.requireDb().run(
+      `INSERT INTO media_info_cache (source_key, info_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(source_key) DO UPDATE SET info_json = excluded.info_json, updated_at = excluded.updated_at`,
+      [youtubeVideoId(url) || url, JSON.stringify(info), now, now]
+    );
+    this.save();
+  }
+
   private ensureYoutubeSearchCache() {
     const db = this.requireDb();
     db.run(
@@ -452,6 +491,18 @@ export class AppDatabase {
       )`
     );
     db.run("CREATE INDEX IF NOT EXISTS idx_youtube_search_cache_query ON youtube_search_cache (query)");
+    this.save();
+  }
+
+  private ensureMediaInfoCache() {
+    this.requireDb().run(
+      `CREATE TABLE IF NOT EXISTS media_info_cache (
+        source_key TEXT PRIMARY KEY,
+        info_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`
+    );
     this.save();
   }
 
@@ -553,22 +604,129 @@ export class AppDatabase {
     // where antivirus and sync filters may keep a just-renamed .tmp handle open.
     this.saveSequence += 1;
     const temporaryPath = `${this.dbPath}.${process.pid}.${this.saveSequence}.tmp`;
-    fs.writeFileSync(temporaryPath, Buffer.from(this.requireDb().export()));
+    const exported = Buffer.from(this.requireDb().export());
+    this.validateDatabaseBytes(exported);
+    fs.writeFileSync(temporaryPath, exported, { flag: "wx" });
+    const temporaryHandle = fs.openSync(temporaryPath, "r+");
     try {
-      fs.renameSync(temporaryPath, this.dbPath);
-    } catch {
-      // Some Windows file-system filters do not permit atomic replacement.
-      // Keep a safe fallback while still avoiding a partially exported file.
-      fs.copyFileSync(temporaryPath, this.dbPath);
-      fs.unlinkSync(temporaryPath);
+      fs.fsyncSync(temporaryHandle);
+    } finally {
+      fs.closeSync(temporaryHandle);
     }
+    this.backupDatabaseIfDue();
+    this.replaceDatabaseFile(temporaryPath);
   }
 
   private recoverInterruptedSave() {
-    const temporaryPath = `${this.dbPath}.tmp`;
-    if (fs.existsSync(this.dbPath) || !fs.existsSync(temporaryPath)) return;
-    fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
-    fs.renameSync(temporaryPath, this.dbPath);
+    const directory = path.dirname(this.dbPath);
+    const baseName = path.basename(this.dbPath);
+    fs.mkdirSync(directory, { recursive: true });
+
+    if (fs.existsSync(this.dbPath) && this.isDatabaseFileValid(this.dbPath)) return;
+
+    const backupDirectory = path.join(directory, "backups");
+    const localCandidates = fs
+      .readdirSync(directory)
+      .filter(
+        (file) =>
+          file === `${baseName}.tmp` ||
+          file.startsWith(`${baseName}.previous-`) ||
+          (file.startsWith(`${baseName}.`) && file.endsWith(".tmp"))
+      )
+      .map((file) => path.join(directory, file));
+    const backupCandidates = fs.existsSync(backupDirectory)
+      ? fs
+          .readdirSync(backupDirectory)
+          .filter((file) => file.startsWith(`${baseName}.`) && file.endsWith(".sqlite.bak"))
+          .map((file) => path.join(backupDirectory, file))
+      : [];
+    const candidates = [...localCandidates, ...backupCandidates]
+      .filter((file) => this.isDatabaseFileValid(file))
+      .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+
+    const recoverySource = candidates[0];
+    if (!recoverySource) {
+      if (fs.existsSync(this.dbPath)) throw new Error(`Database integrity check failed: ${this.dbPath}`);
+      return;
+    }
+
+    if (fs.existsSync(this.dbPath)) {
+      fs.renameSync(this.dbPath, `${this.dbPath}.corrupt-${Date.now()}`);
+    }
+    const recoveryCopy = `${this.dbPath}.recovery-${process.pid}.tmp`;
+    fs.copyFileSync(recoverySource, recoveryCopy, fs.constants.COPYFILE_EXCL);
+    this.openValidatedDatabase(recoveryCopy).close();
+    fs.renameSync(recoveryCopy, this.dbPath);
+  }
+
+  private replaceDatabaseFile(temporaryPath: string) {
+    const previousPath = `${this.dbPath}.previous-${Date.now()}`;
+    const hadPreviousDatabase = fs.existsSync(this.dbPath);
+    if (hadPreviousDatabase) fs.renameSync(this.dbPath, previousPath);
+    try {
+      fs.renameSync(temporaryPath, this.dbPath);
+      this.openValidatedDatabase(this.dbPath).close();
+      this.pruneFiles(path.dirname(this.dbPath), `${path.basename(this.dbPath)}.previous-`, 1);
+    } catch (error) {
+      if (fs.existsSync(this.dbPath)) fs.unlinkSync(this.dbPath);
+      if (hadPreviousDatabase && fs.existsSync(previousPath)) fs.renameSync(previousPath, this.dbPath);
+      throw error;
+    }
+  }
+
+  private backupDatabaseIfDue() {
+    if (!fs.existsSync(this.dbPath) || Date.now() - this.lastBackupAt < 5 * 60 * 1000) return;
+    if (!this.isDatabaseFileValid(this.dbPath)) throw new Error(`Refusing to back up an invalid database: ${this.dbPath}`);
+    const backupDirectory = path.join(path.dirname(this.dbPath), "backups");
+    fs.mkdirSync(backupDirectory, { recursive: true });
+    const backupPath = path.join(
+      backupDirectory,
+      `${path.basename(this.dbPath)}.${new Date().toISOString().replace(/[:.]/g, "-")}.sqlite.bak`
+    );
+    fs.copyFileSync(this.dbPath, backupPath, fs.constants.COPYFILE_EXCL);
+    this.openValidatedDatabase(backupPath).close();
+    this.lastBackupAt = Date.now();
+    this.pruneFiles(backupDirectory, `${path.basename(this.dbPath)}.`, 3);
+  }
+
+  private pruneFiles(directory: string, prefix: string, keep: number) {
+    const files = fs
+      .readdirSync(directory)
+      .filter((file) => file.startsWith(prefix))
+      .map((file) => path.join(directory, file))
+      .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+    for (const file of files.slice(keep)) fs.unlinkSync(file);
+  }
+
+  private openValidatedDatabase(filePath: string) {
+    const bytes = fs.readFileSync(filePath);
+    this.validateDatabaseBytes(bytes);
+    return new (this.requireSql()).Database(bytes);
+  }
+
+  private validateDatabaseBytes(bytes: Uint8Array) {
+    const validationDatabase = new (this.requireSql()).Database(bytes);
+    try {
+      const results = validationDatabase.exec("PRAGMA integrity_check");
+      const valid = results.length === 1 && results[0].values.every((row) => row[0] === "ok");
+      if (!valid) throw new Error("SQLite integrity check failed.");
+    } finally {
+      validationDatabase.close();
+    }
+  }
+
+  private isDatabaseFileValid(filePath: string) {
+    try {
+      this.openValidatedDatabase(filePath).close();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private requireSql() {
+    if (!this.SQL) throw new Error("SQL.js was not initialized.");
+    return this.SQL;
   }
 
   private requireDb() {

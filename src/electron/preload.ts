@@ -38,6 +38,7 @@ const api = {
     ipcRenderer.invoke("downloads:completed", url, type),
   startDownload: (url: string, type: DownloadType): Promise<{ idDownload: number; filePath: string }> =>
     ipcRenderer.invoke("downloads:start", url, type),
+  cancelDownload: (idDownload: number): Promise<boolean> => ipcRenderer.invoke("downloads:cancel", idDownload),
   playFile: (filePath: string): Promise<boolean> => ipcRenderer.invoke("files:play", filePath),
   onProgress: (callback: (payload: ProgressPayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ProgressPayload) => callback(payload);

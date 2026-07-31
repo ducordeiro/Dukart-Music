@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -6,9 +6,9 @@ import { normalizeUsername, verifyPassword } from "./auth";
 import { CentralBackendClient, CentralBackendError } from "./centralBackend";
 import { CentralSessionStore } from "./centralSessionStore";
 import { AppDatabase } from "./database";
-import { downloadErrorMessage, downloadMedia, readMediaInfo } from "./downloader";
+import { downloadErrorMessage, downloadMedia } from "./downloader";
 import { loadLocalEnv } from "./env";
-import { normalizeYoutubeSearchQuery, searchYoutubeMusic } from "./youtubeSearch";
+import { normalizeYoutubeSearchQuery } from "./youtubeSearch";
 import type { AuthUser, DownloadType, UserPlaylist } from "../shared/types";
 import { parseUserPlaylists } from "../shared/userLibrary";
 import { isSupportedYoutubeUrl, youtubeVideoId } from "../shared/youtube";
@@ -22,7 +22,15 @@ let centralSessionStore: CentralSessionStore;
 let activeUser: AuthUser | null = null;
 let legacyLibraryForActiveUser: UserPlaylist[] | null = null;
 const activeDesktopDownloads = new Set<string>();
+const activeDesktopDownloadControllers = new Map<number, AbortController>();
 const FULL_HISTORY_USERNAME = normalizeUsername(process.env.ESPORTE_FAI_HISTORY_ADMIN_USERNAME || "tocagando1234");
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "esporte-fai-media",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true }
+  }
+]);
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -40,24 +48,6 @@ function createWindow() {
   });
 
   const webContents = mainWindow.webContents;
-  const lockZoom = () => {
-    webContents.setZoomFactor(1);
-    void webContents.setVisualZoomLevelLimits(1, 1);
-  };
-  const zoomShortcutCodes = new Set(["Equal", "Minus", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0"]);
-
-  lockZoom();
-  webContents.on("did-finish-load", lockZoom);
-  webContents.on("zoom-changed", (event) => {
-    event.preventDefault();
-    lockZoom();
-  });
-  webContents.on("before-input-event", (event, input) => {
-    if ((input.control || input.meta) && zoomShortcutCodes.has(input.code)) {
-      event.preventDefault();
-      lockZoom();
-    }
-  });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   const productionRendererRoot = pathToFileURL(path.join(__dirname, "../../dist-web") + path.sep).href;
@@ -85,6 +75,7 @@ app.whenReady().then(async () => {
     process.env.ESPORTE_FAI_API_URL || "https://e.duk4rt.com",
     centralSessionStore.load()
   );
+  protocol.handle("esporte-fai-media", handleLocalMediaRequest);
   createWindow();
 });
 
@@ -193,7 +184,7 @@ ipcMain.handle("library:save", async (_event, playlists: unknown, revision?: num
 ipcMain.handle("media:info", async (_event, url: string) => {
   requireDesktopAuth();
   requireYoutubeUrl(url);
-  return readMediaInfo(url);
+  return centralRequest(() => centralBackend.getMediaInfo(url));
 });
 
 ipcMain.handle("downloads:list", async () => {
@@ -220,7 +211,7 @@ ipcMain.handle("music:search", async (_event, query: string) => {
   if (!normalized) {
     throw new Error("Digite o nome da musica.");
   }
-  return searchYoutubeMusic(database, normalized);
+  return centralRequest(() => centralBackend.searchMusic(normalized));
 });
 
 ipcMain.handle("downloads:completed", async (_event, url: string, type?: DownloadType) => {
@@ -248,6 +239,8 @@ ipcMain.handle("downloads:start", async (_event, url: string, type: DownloadType
     throw new Error("Main window is not ready.");
   }
   const downloadsDir = path.join(app.getPath("music"), "Esporte fai");
+  const controller = new AbortController();
+  let trackedDownloadId = 0;
   activeDesktopDownloads.add(downloadKey);
   try {
     return await downloadMedia(
@@ -259,15 +252,30 @@ ipcMain.handle("downloads:start", async (_event, url: string, type: DownloadType
         mainWindow?.webContents.send("download-progress", payload);
       },
       (idDownload) => {
+        trackedDownloadId = idDownload;
+        activeDesktopDownloadControllers.set(idDownload, controller);
         database.linkDownloadToUser(user.idUser, idDownload);
-      }
+      },
+      controller.signal
     );
   } catch (error) {
     console.error("Download failed:", error);
     throw new Error(downloadErrorMessage(error));
   } finally {
     activeDesktopDownloads.delete(downloadKey);
+    if (trackedDownloadId) activeDesktopDownloadControllers.delete(trackedDownloadId);
   }
+});
+
+ipcMain.handle("downloads:cancel", async (_event, idDownload: number) => {
+  const user = requireDesktopAuth();
+  const record = database.getDownload(Number(idDownload), user.idUser);
+  if (!record) throw new Error("Download não encontrado.");
+  const controller = activeDesktopDownloadControllers.get(record.idDownload);
+  if (!controller) throw new Error("Este download não está mais em andamento.");
+  controller.abort();
+  database.cancelDownload(record.idDownload);
+  return true;
 });
 
 ipcMain.handle("files:play", async (_event, filePath: string) => {
@@ -360,4 +368,27 @@ function safelyReadOrigin(value: string) {
   } catch {
     return "";
   }
+}
+
+function handleLocalMediaRequest(request: Request) {
+  const user = activeUser;
+  if (!user) return new Response("Faça login para continuar.", { status: 401 });
+
+  let idDownload: number;
+  try {
+    const parsed = new URL(request.url);
+    if (parsed.hostname !== "download") return new Response("Arquivo inválido.", { status: 400 });
+    idDownload = Number(parsed.pathname.replace(/^\/+/, ""));
+  } catch {
+    return new Response("Arquivo inválido.", { status: 400 });
+  }
+
+  if (!Number.isSafeInteger(idDownload) || idDownload <= 0) {
+    return new Response("Arquivo inválido.", { status: 400 });
+  }
+  const record = database.getDownload(idDownload, user.idUser);
+  if (!record?.filePath || !fs.existsSync(record.filePath)) {
+    return new Response("Arquivo não encontrado.", { status: 404 });
+  }
+  return net.fetch(pathToFileURL(record.filePath).toString(), { headers: request.headers });
 }

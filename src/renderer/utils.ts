@@ -6,7 +6,7 @@ export function isValidUrl(value: string) {
 }
 
 export function formatMb(bytes?: number | null) {
-  if (!bytes) return "** MB";
+  if (bytes === undefined || bytes === null) return "** MB";
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
@@ -31,7 +31,8 @@ export function formatDateTime(value?: string | null) {
 }
 
 export function streamUrl(track?: DownloadRecord | null) {
-  if (!track || window.esporteFai) return "";
+  if (!track) return "";
+  if (window.esporteFai) return `esporte-fai-media://download/${track.idDownload}`;
   return `/api/files/${track.idDownload}/stream`;
 }
 
@@ -61,7 +62,7 @@ export function readPlaylistCover(file: File) {
       const image = new Image();
       image.onerror = () => reject(new Error("Nao foi possivel carregar a imagem."));
       image.onload = () => {
-        const size = 512;
+        const size = 320;
         const canvas = document.createElement("canvas");
         canvas.width = size;
         canvas.height = size;
@@ -75,7 +76,7 @@ export function readPlaylistCover(file: File) {
         const sourceX = Math.max(0, (image.width - sourceSize) / 2);
         const sourceY = Math.max(0, (image.height - sourceSize) / 2);
         context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, size, size);
-        resolve(canvas.toDataURL("image/jpeg", 0.86));
+        resolve(canvas.toDataURL("image/jpeg", 0.78));
       };
       image.src = String(reader.result || "");
     };

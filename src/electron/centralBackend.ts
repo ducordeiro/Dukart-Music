@@ -2,9 +2,11 @@ import type {
   AuthResult,
   AuthUser,
   DownloadRecord,
+  MediaInfo,
   UserLibrarySaveResult,
   UserLibrarySnapshot,
-  UserPlaylist
+  UserPlaylist,
+  YoutubeSearchResult
 } from "../shared/types";
 
 interface CentralAuthResult extends AuthResult {
@@ -91,6 +93,14 @@ export class CentralBackendClient {
 
   listDownloadHistory(): Promise<DownloadRecord[]> {
     return this.request("/api/downloads/history");
+  }
+
+  getMediaInfo(url: string): Promise<MediaInfo> {
+    return this.request(`/api/media-info?url=${encodeURIComponent(url)}`);
+  }
+
+  searchMusic(query: string): Promise<YoutubeSearchResult[]> {
+    return this.request(`/api/musicas/buscar?q=${encodeURIComponent(query)}`);
   }
 
   async saveLibrary(playlists: UserPlaylist[], revision?: number): Promise<UserLibrarySaveResult> {

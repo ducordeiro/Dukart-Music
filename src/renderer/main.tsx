@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type {
   AuthUser,
   DownloadRecord,
+  DownloadStatus,
   DownloadType,
   UserLibrarySnapshot,
   UserPlaylistTrack,
@@ -14,9 +15,9 @@ import {
   playlistTrackFromDownload,
   playlistTrackKey
 } from "../shared/userLibrary";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { AuthView } from "./AuthView";
-import { BottomNavigation, BottomSheet, HomeView, Modal, PlayerReturnTab, PlayerView, PlaylistDetailView, PlaylistsView, SearchView, SettingsView } from "./components";
+import { BottomNavigation, BottomSheet, HomeView, Modal, PlayerReturnTab, PlayerView, PlaylistDetailView, PlaylistsView, QueueSheet, SearchView, SettingsView } from "./components";
 import { LIKED_ID, THEME_KEY } from "./constants";
 import { hasLegacyLibrary, likedPlaylist, loadLegacyLibrary, removeLegacyLibrary } from "./library";
 import {
@@ -37,6 +38,16 @@ import "./styles.css";
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
+
+interface DownloadTask {
+  idDownload: number;
+  url: string;
+  title: string;
+  type: DownloadType;
+  status: DownloadStatus;
+  progress: number;
+  message?: string;
 }
 
 let deferredInstallPrompt: BeforeInstallPromptEvent | null = null;
@@ -70,36 +81,51 @@ function isIOSDevice() {
   return /iPad|iPhone|iPod/.test(userAgent) || (platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
-function lockApplicationScale() {
-  const zoomCodes = new Set(["Equal", "Minus", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0"]);
+function recentSearchStorageKey(idUser: number) {
+  return `esporte-fai:recent-searches:${idUser}`;
+}
 
-  const preventKeyboardZoom = (event: KeyboardEvent) => {
-    if ((event.ctrlKey || event.metaKey) && zoomCodes.has(event.code)) {
-      event.preventDefault();
-    }
-  };
-  const preventWheelZoom = (event: WheelEvent) => {
-    if (event.ctrlKey || event.metaKey) {
-      event.preventDefault();
-    }
-  };
-  const preventGestureZoom = (event: Event) => {
-    event.preventDefault();
-  };
+const CACHED_USER_KEY = "esporte-fai:cached-user";
 
-  window.addEventListener("keydown", preventKeyboardZoom, { capture: true });
-  window.addEventListener("wheel", preventWheelZoom, { capture: true, passive: false });
-  document.addEventListener("gesturestart", preventGestureZoom, { capture: true, passive: false });
-  document.addEventListener("gesturechange", preventGestureZoom, { capture: true, passive: false });
-  document.addEventListener("gestureend", preventGestureZoom, { capture: true, passive: false });
+function libraryCacheKey(idUser: number) {
+  return `esporte-fai:library:${idUser}`;
+}
 
-  return () => {
-    window.removeEventListener("keydown", preventKeyboardZoom, { capture: true });
-    window.removeEventListener("wheel", preventWheelZoom, { capture: true });
-    document.removeEventListener("gesturestart", preventGestureZoom, { capture: true });
-    document.removeEventListener("gesturechange", preventGestureZoom, { capture: true });
-    document.removeEventListener("gestureend", preventGestureZoom, { capture: true });
-  };
+function queueStorageKey(idUser: number) {
+  return `esporte-fai:queue:${idUser}`;
+}
+
+function readCachedUser(): AuthUser | null {
+  try {
+    const user = JSON.parse(localStorage.getItem(CACHED_USER_KEY) || "null") as AuthUser | null;
+    return user && Number.isSafeInteger(user.idUser) && typeof user.username === "string" ? user : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheAuthenticatedUser(user: AuthUser) {
+  localStorage.setItem(CACHED_USER_KEY, JSON.stringify(user));
+}
+
+function readCachedLibrary(idUser: number): UserLibrarySnapshot | null {
+  try {
+    const snapshot = JSON.parse(localStorage.getItem(libraryCacheKey(idUser)) || "null") as UserLibrarySnapshot | null;
+    return snapshot && Number.isSafeInteger(snapshot.revision) && (snapshot.playlists === null || Array.isArray(snapshot.playlists)) ? snapshot : null;
+  } catch {
+    return null;
+  }
+}
+
+function readRecentSearches(idUser: number): YoutubeSearchResult[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(recentSearchStorageKey(idUser)) || "[]");
+    return Array.isArray(value)
+      ? value.filter((item) => item && typeof item.videoId === "string" && typeof item.titulo === "string").slice(0, 8)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout: () => Promise<void> }) {
@@ -112,7 +138,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   const [musicSearchLoading, setMusicSearchLoading] = useState(false);
   const [musicSearchError, setMusicSearchError] = useState("");
   const [selectedMusic, setSelectedMusic] = useState<YoutubeSearchResult | null>(null);
-  const [recentSearches, setRecentSearches] = useState<YoutubeSearchResult[]>([]);
+  const [recentSearches, setRecentSearches] = useState<YoutubeSearchResult[]>(() => readRecentSearches(authUser.idUser));
   const [playableDownload, setPlayableDownload] = useState<DownloadRecord | null>(null);
   const [view, setView] = useState<View>("main");
   const [previousView, setPreviousView] = useState<View>("playlists");
@@ -123,17 +149,20 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   const [progress, setProgress] = useState<Record<DownloadType, number>>({ audio: 0, video: 0 });
   const [message, setMessage] = useState("");
   const [downloads, setDownloads] = useState<DownloadRecord[]>([]);
+  const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
   const [playlists, setPlaylists] = useState<UserPlaylist[]>(() => [likedPlaylist()]);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [libraryLoadError, setLibraryLoadError] = useState("");
   const [libraryLoadAttempt, setLibraryLoadAttempt] = useState(0);
   const libraryLoadPromiseRef = useRef<Promise<UserLibrarySnapshot> | null>(null);
   const librarySaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const librarySaveTimerRef = useRef<number | null>(null);
   const playlistsRef = useRef(playlists);
   const libraryBaseRef = useRef<UserPlaylist[]>(playlists);
   const libraryRevisionRef = useRef(0);
   const skipNextLibrarySaveRef = useRef(false);
   const [queue, setQueue] = useState<DownloadRecord[]>([]);
+  const queueHydratedRef = useRef(false);
   const [currentTrack, setCurrentTrack] = useState<DownloadRecord | null>(null);
   const [queueArtwork, setQueueArtwork] = useState("");
   const [playbackMediaUrl, setPlaybackMediaUrl] = useState("");
@@ -142,6 +171,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   const [duration, setDuration] = useState(0);
   const [showAddSheet, setShowAddSheet] = useState(false);
   const [showNewPlaylist, setShowNewPlaylist] = useState(false);
+  const [showQueue, setShowQueue] = useState(false);
   const [newPlaylistTrack, setNewPlaylistTrack] = useState<DownloadRecord | null>(null);
   const [playlistDraft, setPlaylistDraft] = useState("");
   const [sheetSelection, setSheetSelection] = useState<string[]>([]);
@@ -159,7 +189,10 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     mode: "saving" | "removing";
     completed: number;
     total: number;
+    receivedBytes?: number;
+    totalBytes?: number;
   } | null>(null);
+  const offlinePlaylistAbortRef = useRef<AbortController | null>(null);
   const [syncedDownloadBusyKey, setSyncedDownloadBusyKey] = useState<string | null>(null);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(() => deferredInstallPrompt);
   const [appInstalled, setAppInstalled] = useState(() => installedFromBrowserEvent || isRunningAsInstalledApp());
@@ -173,7 +206,14 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     [completedDownloads]
   );
   const selectedPlaylist = playlists.find((playlist) => playlist.id === selectedPlaylistId) || playlists[0] || likedPlaylist();
-  const selectedTracks = completedDownloads.filter((item) => playlistContainsDownload(selectedPlaylist, item));
+  const selectedTracks = useMemo(() => {
+    const byKey = new Map(completedDownloads.map((item) => [playlistTrackKey(item.url, item.type), item]));
+    if (selectedPlaylist.items?.length) {
+      return selectedPlaylist.items.map((item) => byKey.get(item.key)).filter((item): item is DownloadRecord => Boolean(item));
+    }
+    const byId = new Map(completedDownloads.map((item) => [item.idDownload, item]));
+    return selectedPlaylist.itemIds.map((id) => byId.get(id)).filter((item): item is DownloadRecord => Boolean(item));
+  }, [completedDownloads, selectedPlaylist]);
   const selectedTrackKeys = new Set(selectedTracks.map((track) => playlistTrackKey(track.url, track.type)));
   const unavailableSyncedTracks = (selectedPlaylist.items || []).filter((item) => !selectedTrackKeys.has(item.key));
   const selectedAudioTracks = selectedTracks.filter((track) => track.type === "audio");
@@ -196,13 +236,43 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   const isFavorite = currentTrack && liked ? playlistContainsDownload(liked, currentTrack) : false;
 
   useEffect(() => {
+    if (queueHydratedRef.current || !completedDownloads.length) return;
+    queueHydratedRef.current = true;
+    try {
+      const ids = JSON.parse(localStorage.getItem(queueStorageKey(authUser.idUser)) || "[]") as number[];
+      const byId = new Map(completedDownloads.map((track) => [track.idDownload, track]));
+      setQueue(ids.map((id) => byId.get(id)).filter((track): track is DownloadRecord => Boolean(track)));
+    } catch {
+      setQueue([]);
+    }
+  }, [authUser.idUser, completedDownloads]);
+
+  useEffect(() => {
+    if (!queueHydratedRef.current) return;
+    localStorage.setItem(queueStorageKey(authUser.idUser), JSON.stringify(queue.map((track) => track.idDownload)));
+  }, [authUser.idUser, queue]);
+
+  useEffect(() => {
+    localStorage.setItem(recentSearchStorageKey(authUser.idUser), JSON.stringify(recentSearches));
+  }, [authUser.idUser, recentSearches]);
+
+  useEffect(() => {
     let active = true;
     setLibraryLoaded(false);
     setLibraryLoadError("");
 
     if (!libraryLoadPromiseRef.current) {
       libraryLoadPromiseRef.current = (async () => {
-        const storedLibrary = await api.loadLibrary();
+        let storedLibrary: UserLibrarySnapshot;
+        try {
+          storedLibrary = await api.loadLibrary();
+          localStorage.setItem(libraryCacheKey(authUser.idUser), JSON.stringify(storedLibrary));
+        } catch (error) {
+          const cached = readCachedLibrary(authUser.idUser);
+          if (!cached) throw error;
+          setMessage("Modo offline: exibindo a biblioteca salva neste aparelho.");
+          return cached;
+        }
         if (storedLibrary.playlists) return storedLibrary;
 
         const shouldMigrateLegacyLibrary = hasLegacyLibrary();
@@ -299,6 +369,17 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       skipNextLibrarySaveRef.current = false;
       return;
     }
+    if (librarySaveTimerRef.current) window.clearTimeout(librarySaveTimerRef.current);
+    librarySaveTimerRef.current = window.setTimeout(() => {
+      librarySaveTimerRef.current = null;
+      enqueueLibrarySave();
+    }, 600);
+    return () => {
+      if (librarySaveTimerRef.current) window.clearTimeout(librarySaveTimerRef.current);
+    };
+  }, [libraryLoaded, playlists]);
+
+  function enqueueLibrarySave() {
     const saveOperation = librarySaveChainRef.current
       .catch(() => undefined)
       .then(async () => {
@@ -318,7 +399,17 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     void saveOperation.catch(() => {
       setMessage("Nao foi possivel salvar as alteracoes da sua conta.");
     });
-  }, [libraryLoaded, playlists]);
+    return saveOperation;
+  }
+
+  function flushPendingLibrarySave() {
+    if (librarySaveTimerRef.current) {
+      window.clearTimeout(librarySaveTimerRef.current);
+      librarySaveTimerRef.current = null;
+      return enqueueLibrarySave();
+    }
+    return librarySaveChainRef.current;
+  }
 
   useEffect(() => {
     if (!libraryLoaded || !downloads.length) return;
@@ -343,7 +434,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
     const refreshAccountLibrary = async () => {
       try {
-        await librarySaveChainRef.current;
+        await flushPendingLibrarySave();
         const remoteLibrary = await api.loadLibrary();
         if (cancelled || remoteLibrary.revision === libraryRevisionRef.current) return;
 
@@ -384,6 +475,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         const committed = result.library.playlists || candidate;
         libraryRevisionRef.current = result.library.revision;
         libraryBaseRef.current = committed;
+        localStorage.setItem(libraryCacheKey(authUser.idUser), JSON.stringify(result.library));
         return committed;
       }
 
@@ -497,6 +589,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
   useEffect(() => {
     return api.onProgress((payload) => {
+      setDownloadTasks((current) => upsertDownloadTask(current, { ...payload, url: current.find((item) => item.idDownload === payload.idDownload)?.url || "", title: current.find((item) => item.idDownload === payload.idDownload)?.title || "Download" }));
       setProgress((current) => ({ ...current, [payload.type]: payload.progress }));
       if (payload.status === "completed") {
         setStatus((current) => ({ ...current, [payload.type]: "completed" }));
@@ -507,6 +600,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         setStatus((current) => ({ ...current, [payload.type]: "failed" }));
         setMessage(payload.message || "Falha no download.");
       }
+      if (payload.status === "cancelled") setMessage("Download cancelado.");
     });
   }, []);
 
@@ -553,7 +647,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   }, [url, validUrl, downloads]);
 
   useEffect(() => {
-    if (!mediaRef.current || !currentTrack || window.esporteFai) return;
+    if (!mediaRef.current || !currentTrack) return;
     setCurrentTime(0);
     setDuration(0);
     mediaRef.current.load();
@@ -565,31 +659,6 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         setMessage("Toque em Play para iniciar.");
       });
   }, [currentTrack]);
-
-  useEffect(() => {
-    let frame = 0;
-
-    const syncTimeline = () => {
-      const audio = mediaRef.current;
-      if (audio) {
-        setCurrentTime(audio.currentTime || 0);
-        if (Number.isFinite(audio.duration)) {
-          setDuration(audio.duration || 0);
-        }
-      }
-      if (audio && !audio.paused && !audio.ended) {
-        frame = window.requestAnimationFrame(syncTimeline);
-      }
-    };
-
-    if (isPlaying && !window.esporteFai) {
-      frame = window.requestAnimationFrame(syncTimeline);
-    }
-
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-    };
-  }, [isPlaying, currentTrack]);
 
   async function refreshDownloads() {
     try {
@@ -611,6 +680,13 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     if (!query) {
       setMusicSearchError("Digite o nome da musica.");
       setMusicResults([]);
+      return;
+    }
+    if (isValidUrl(query)) {
+      updateUrl(query);
+      setMusicResults([]);
+      setMusicSearchError("");
+      setMessage("Link reconhecido. Escolha tocar, baixar áudio ou baixar vídeo.");
       return;
     }
     if (musicSearchBusyRef.current) return;
@@ -651,11 +727,49 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     setUrl(value);
   }
 
-  async function startDownload(type: DownloadType) {
-    if (!validUrl) return;
+  function updateSmartSearch(value: string) {
+    setMusicSearch(value);
+    if (isValidUrl(value.trim())) {
+      updateUrl(value.trim());
+    } else if (selectedMusic && !value.toLowerCase().includes(selectedMusic.titulo.toLowerCase())) {
+      setSelectedMusic(null);
+      setUrl("");
+    }
+  }
+
+  async function playSearchResult(result: YoutubeSearchResult) {
+    if (musicSearchBusyRef.current) return;
+    const targetUrl = youtubeUrl(result.videoId);
+    selectMusic(result);
+    try {
+      musicSearchBusyRef.current = true;
+      setMessage(`Preparando ${result.titulo}...`);
+      let record = await api.findCompleted(targetUrl, "audio");
+      if (!record?.filePath) {
+        setStatus((current) => ({ ...current, audio: "loading" }));
+        setProgress((current) => ({ ...current, audio: 0 }));
+        const started = await api.startDownload(targetUrl, "audio");
+        setDownloadTasks((current) => upsertDownloadTask(current, { idDownload: started.idDownload, url: targetUrl, title: result.titulo, type: "audio", status: started.filePath ? "completed" : "downloading", progress: started.filePath ? 100 : 0 }));
+        if (!window.esporteFai && !started.filePath) await waitForWebDownload(started.idDownload, "audio");
+        record = await api.findCompleted(targetUrl, "audio");
+      }
+      if (!record?.filePath) throw new Error("O áudio terminou de baixar, mas ainda não está disponível.");
+      await refreshDownloads();
+      setStatus((current) => ({ ...current, audio: "completed", play: "playing" }));
+      startQueue([record], 0, true, "");
+    } catch (error) {
+      setStatus((current) => ({ ...current, audio: "failed" }));
+      setMessage(error instanceof Error ? error.message : "Não foi possível preparar esta música.");
+    } finally {
+      musicSearchBusyRef.current = false;
+    }
+  }
+
+  async function startDownload(type: DownloadType, targetUrl = url, taskTitle = selectedMusic?.titulo || targetUrl) {
+    if (!isValidUrl(targetUrl)) return;
 
     try {
-      const existing = await api.findCompleted(url, type);
+      const existing = await api.findCompleted(targetUrl, type);
       if (existing?.filePath) {
         const openExisting = window.confirm("Este link ja foi baixado. Reproduzir o arquivo existente?");
         if (openExisting) {
@@ -667,7 +781,8 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       setStatus((current) => ({ ...current, [type]: "loading" }));
       setProgress((current) => ({ ...current, [type]: 0 }));
       setMessage(type === "audio" ? "Baixando audio..." : "Baixando audio e video...");
-      const startedDownload = await api.startDownload(url, type);
+      const startedDownload = await api.startDownload(targetUrl, type);
+      setDownloadTasks((current) => upsertDownloadTask(current, { idDownload: startedDownload.idDownload, url: targetUrl, title: taskTitle, type, status: startedDownload.filePath ? "completed" : "downloading", progress: startedDownload.filePath ? 100 : 0 }));
       if (!window.esporteFai && !startedDownload.filePath) {
         await waitForWebDownload(startedDownload.idDownload, type);
       }
@@ -712,6 +827,10 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         if (!payload) throw new Error("Download não encontrado.");
         transientFailures = 0;
         setProgress((current) => ({ ...current, [type]: Math.max(0, Math.min(100, payload.progress || 0)) }));
+        setDownloadTasks((current) => {
+          const existing = current.find((item) => item.idDownload === idDownload);
+          return existing ? upsertDownloadTask(current, { ...existing, status: payload.status, progress: payload.progress || 0, message: "message" in payload ? payload.message : undefined }) : current;
+        });
 
         if (payload.status === "completed") return;
         if (payload.status === "failed" || payload.status === "cancelled") {
@@ -723,15 +842,32 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       } catch (error) {
         transientFailures += 1;
         const typedError = error as { status?: number; terminal?: boolean };
-        if (typedError.status === 401 || typedError.terminal || transientFailures >= 5) {
+        if (typedError.status === 401 || typedError.terminal) {
           throw error;
         }
       }
 
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      await new Promise((resolve) => window.setTimeout(resolve, Math.min(5_000, 700 * Math.max(1, transientFailures))));
     }
 
     throw new Error("O download demorou mais que o esperado. Consulte o histórico em alguns minutos.");
+  }
+
+  async function cancelDownloadTask(task: DownloadTask) {
+    try {
+      await api.cancelDownload(task.idDownload);
+      setDownloadTasks((current) => upsertDownloadTask(current, { ...task, status: "cancelled" }));
+      setMessage("Download cancelado.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Não foi possível cancelar o download.");
+    }
+  }
+
+  async function retryDownloadTask(task: DownloadTask) {
+    updateUrl(task.url);
+    setSelectedMusic(null);
+    setDownloadTasks((current) => current.filter((item) => item.idDownload !== task.idDownload));
+    await startDownload(task.type, task.url, task.title);
   }
 
   async function playLatest() {
@@ -751,6 +887,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   function startQueue(nextQueue: DownloadRecord[], index: number, openPlayer = true, artwork?: string) {
     if (!nextQueue.length) return;
     const target = nextQueue[index] || nextQueue[0];
+    queueHydratedRef.current = true;
     setQueue(nextQueue);
     setCurrentTrack(target);
     if (artwork !== undefined) setQueueArtwork(artwork);
@@ -761,9 +898,6 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     if (openPlayer) {
       setPreviousView(view === "player" ? previousView : view);
       setView("player");
-    }
-    if (window.esporteFai) {
-      api.playExternal(target);
     }
   }
 
@@ -782,7 +916,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     }
 
     const audio = mediaRef.current;
-    if (!audio || window.esporteFai) {
+    if (!audio) {
       setIsPlaying((value) => !value);
       return;
     }
@@ -854,6 +988,30 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     if (!audio) return;
     audio.currentTime = value;
     setCurrentTime(value);
+  }
+
+  function moveQueueTrack(index: number, direction: -1 | 1) {
+    setQueue((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }
+
+  function removeQueueTrack(index: number) {
+    setQueue((current) => {
+      const removed = current[index];
+      const next = current.filter((_, itemIndex) => itemIndex !== index);
+      if (removed?.idDownload === currentTrack?.idDownload) {
+        const replacement = next[Math.min(index, next.length - 1)] || null;
+        setCurrentTrack(replacement);
+        setPlaybackMediaUrl(mediaUrlForTrack(replacement));
+        if (!replacement) setShowQueue(false);
+      }
+      return next;
+    });
   }
 
   function toggleFavorite(track = currentTrack) {
@@ -976,7 +1134,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
   async function persistAndLogout() {
     try {
-      await librarySaveChainRef.current;
+      await flushPendingLibrarySave();
     } catch {
       setMessage("Nao foi possivel salvar as alteracoes da sua conta.");
       throw new Error("A biblioteca ainda nao foi salva.");
@@ -1048,7 +1206,12 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   }
 
   async function togglePlaylistOffline() {
-    if (offlinePlaylistProgress) return;
+    if (offlinePlaylistProgress) {
+      if (offlinePlaylistProgress.mode === "removing") return;
+      offlinePlaylistAbortRef.current?.abort();
+      setMessage("Cancelando operação offline...");
+      return;
+    }
     if (window.esporteFai) {
       setMessage("O modo offline de playlists esta disponivel no PWA ou navegador.");
       return;
@@ -1095,9 +1258,13 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     const missingLocalTracks = selectedAudioTracks.filter((track) => !offlineAudioIds.includes(track.idDownload));
     const tracksToPrepare = unavailableSyncedAudioTracks;
     const operationTotal = missingLocalTracks.length + tracksToPrepare.length;
+    const totalBytes = missingLocalTracks.reduce((sum, track) => sum + (track.sizeBytes || 0), 0);
+    const controller = new AbortController();
+    offlinePlaylistAbortRef.current = controller;
+    let completedBytes = 0;
     let saved = 0;
     let failures = 0;
-    setOfflinePlaylistProgress({ mode: "saving", completed: 0, total: operationTotal });
+    setOfflinePlaylistProgress({ mode: "saving", completed: 0, total: operationTotal, receivedBytes: 0, totalBytes });
 
     const markCompleted = () => {
       setOfflinePlaylistProgress((current) =>
@@ -1106,16 +1273,21 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     };
     const cacheTrack = async (track: DownloadRecord) => {
       setOfflineBusyId(track.idDownload);
-      await saveTrackOffline(track, authUser.idUser);
+      await saveTrackOffline(track, authUser.idUser, {
+        signal: controller.signal,
+        onProgress: (receivedBytes) => setOfflinePlaylistProgress((current) => current ? { ...current, receivedBytes: completedBytes + receivedBytes } : current)
+      });
       upsertOfflineRecord(track, authUser.idUser);
       setOfflineAudioIds((current) =>
         current.includes(track.idDownload) ? current : [...current, track.idDownload]
       );
       saved += 1;
+      completedBytes += track.sizeBytes || 0;
     };
 
     try {
       for (const track of missingLocalTracks) {
+        if (controller.signal.aborted) break;
         try {
           await cacheTrack(track);
         } catch {
@@ -1126,6 +1298,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       }
 
       for (const syncedTrack of tracksToPrepare) {
+        if (controller.signal.aborted) break;
         setSyncedDownloadBusyKey(syncedTrack.key);
         try {
           let localTrack = await api.findCompleted(syncedTrack.url, syncedTrack.type);
@@ -1150,7 +1323,9 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
       if (tracksToPrepare.length) await refreshDownloads();
       setMessage(
-        failures
+        controller.signal.aborted
+          ? `Operação cancelada. ${saved} músicas foram mantidas offline.`
+          : failures
           ? `${saved} musicas salvas offline; ${failures} nao puderam ser baixadas.`
           : "Playlist disponivel offline neste aparelho."
       );
@@ -1158,6 +1333,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       setOfflineBusyId(null);
       setSyncedDownloadBusyKey(null);
       setOfflinePlaylistProgress(null);
+      offlinePlaylistAbortRef.current = null;
     }
   }
 
@@ -1194,7 +1370,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
     window.setTimeout(() => {
       const media = mediaRef.current;
-      if (!media || window.esporteFai) return;
+      if (!media) return;
       media.load();
       media
         .play()
@@ -1288,7 +1464,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           setUrl={updateUrl}
           validUrl={validUrl}
           musicSearch={musicSearch}
-          setMusicSearch={setMusicSearch}
+          setMusicSearch={updateSmartSearch}
           musicResults={musicResults}
           musicSearchLoading={musicSearchLoading}
           musicSearchError={musicSearchError}
@@ -1296,12 +1472,16 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           selectedMusic={selectedMusic}
           runMusicSearch={searchMusicByName}
           selectMusic={selectMusic}
+          playResult={playSearchResult}
           canPlayLatest={Boolean(playableDownload)}
           audioSize={audioSize}
           videoSize={videoSize}
           status={status}
           progress={progress}
           message={message}
+          downloadTasks={downloadTasks}
+          cancelDownload={cancelDownloadTask}
+          retryDownload={retryDownloadTask}
           startDownload={startDownload}
           playLatest={playLatest}
           cancelSearch={() => {
@@ -1381,6 +1561,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
             setSheetSelection([]);
             setShowAddSheet(true);
           }}
+          openQueue={() => setShowQueue(true)}
           toggleRepeat={() => setRepeatQueue((value) => !value)}
           isOfflineSaved={currentTrack ? offlineAudioIds.includes(currentTrack.idDownload) : false}
           offlineBusy={currentTrack ? offlineBusyId === currentTrack.idDownload : false}
@@ -1401,6 +1582,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
       {view === "settings" && (
         <SettingsView
+          idUser={authUser.idUser}
           username={authUser.username}
           downloads={settingsHistoryDownloads}
           historyLoaded={settingsHistoryLoaded}
@@ -1443,6 +1625,24 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         />
       )}
 
+      {showQueue && (
+        <QueueSheet
+          queue={queue}
+          currentTrackId={currentTrack?.idDownload}
+          close={() => setShowQueue(false)}
+          play={(index) => startQueue(queue, index, false)}
+          move={moveQueueTrack}
+          remove={removeQueueTrack}
+          clear={() => {
+            mediaRef.current?.pause();
+            setQueue([]);
+            setCurrentTrack(null);
+            setPlaybackMediaUrl("");
+            setShowQueue(false);
+          }}
+        />
+      )}
+
       {showNewPlaylist && (
         <Modal
           title="Nova Playlist"
@@ -1470,8 +1670,6 @@ function App() {
   const [authState, setAuthState] = useState<"loading" | "guest" | "authenticated">("loading");
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
 
-  useEffect(() => lockApplicationScale(), []);
-
   useEffect(() => {
     registerServiceWorker();
   }, []);
@@ -1491,13 +1689,25 @@ function App() {
       .authSession()
       .then(({ user }) => {
         if (!active) return;
+        if (user) cacheAuthenticatedUser(user);
         setAuthUser(user);
         setAuthState(user ? "authenticated" : "guest");
       })
-      .catch(() => {
+      .catch((error) => {
         if (!active) return;
-        setAuthUser(null);
-        setAuthState("guest");
+        if (error instanceof ApiError && error.status === 401) {
+          setAuthUser(null);
+          setAuthState("guest");
+          return;
+        }
+        const cachedUser = readCachedUser();
+        if (cachedUser) {
+          setAuthUser(cachedUser);
+          setAuthState("authenticated");
+        } else {
+          setAuthUser(null);
+          setAuthState("guest");
+        }
       });
     return () => {
       active = false;
@@ -1516,6 +1726,7 @@ function App() {
     return (
       <AuthView
         onAuthenticated={(user) => {
+          cacheAuthenticatedUser(user);
           setAuthUser(user);
           setAuthState("authenticated");
         }}
@@ -1528,6 +1739,7 @@ function App() {
       authUser={authUser}
       onLogout={async () => {
         await api.authLogout();
+        localStorage.removeItem(CACHED_USER_KEY);
         setAuthUser(null);
         setAuthState("guest");
       }}
@@ -1537,6 +1749,10 @@ function App() {
 
 function librariesEqual(left: UserPlaylist[], right: UserPlaylist[]) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function upsertDownloadTask(tasks: DownloadTask[], task: DownloadTask) {
+  return [task, ...tasks.filter((item) => item.idDownload !== task.idDownload)].slice(0, 12);
 }
 
 createRoot(document.getElementById("root")!).render(
