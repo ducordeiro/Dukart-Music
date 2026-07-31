@@ -28,12 +28,13 @@ const SESSION_COOKIE = "esporte_fai_session";
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const CANONICAL_WEB_HOST = process.env.ESPORTE_FAI_CANONICAL_HOST || "e.duk4rt.com";
 const LEGACY_WEB_HOST = process.env.ESPORTE_FAI_LEGACY_HOST || "duk4rt.com";
+const FULL_HISTORY_USERNAME = normalizeUsername(process.env.ESPORTE_FAI_HISTORY_ADMIN_USERNAME || "tocagando1234");
 
 const database = new AppDatabase(dbPath, schemaPath);
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.setHeader(
     "Content-Security-Policy",
     "default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: https:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'self'"
@@ -42,6 +43,9 @@ app.use((_req, res, next) => {
   res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   res.setHeader("Referrer-Policy", "no-referrer");
+  if (isSecureRequest(req)) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   next();
@@ -223,6 +227,12 @@ app.get("/api/downloads", (_req, res) => {
   res.json(database.listDownloads(user.idUser).map(withFileAvailability));
 });
 
+app.get("/api/downloads/history", (_req, res) => {
+  const user = res.locals.authUser as AuthUser;
+  const idUser = canViewFullHistory(user) ? undefined : user.idUser;
+  res.json(database.listDownloadHistory(idUser).map(withFileAvailability));
+});
+
 app.get("/api/musicas/buscar", async (req, res, next) => {
   try {
     const query = normalizeYoutubeSearchQuery(String(req.query.q || ""));
@@ -319,7 +329,7 @@ app.post("/api/downloads", async (req, res, next) => {
 
 app.get("/api/files/:id", (req, res) => {
   const user = res.locals.authUser as AuthUser;
-  const record = database.getDownload(Number(req.params.id), user.idUser);
+  const record = database.getDownload(Number(req.params.id), canViewFullHistory(user) ? undefined : user.idUser);
   if (!record?.filePath || !fs.existsSync(record.filePath)) {
     res.status(404).json({ error: "File not found." });
     return;
@@ -330,7 +340,7 @@ app.get("/api/files/:id", (req, res) => {
 
 app.get("/api/files/:id/stream", (req, res) => {
   const user = res.locals.authUser as AuthUser;
-  const record = database.getDownload(Number(req.params.id), user.idUser);
+  const record = database.getDownload(Number(req.params.id), canViewFullHistory(user) ? undefined : user.idUser);
   if (!record?.filePath || !fs.existsSync(record.filePath)) {
     res.status(404).json({ error: "File not found." });
     return;
@@ -401,6 +411,10 @@ function isDownloadType(value: unknown): value is DownloadType {
   return value === "audio" || value === "video";
 }
 
+function canViewFullHistory(user: AuthUser) {
+  return normalizeUsername(user.username) === FULL_HISTORY_USERNAME;
+}
+
 function isFileAvailable(record: DownloadRecord) {
   return Boolean(record.filePath && fs.existsSync(record.filePath));
 }
@@ -424,18 +438,28 @@ function withFileAvailability(record: DownloadRecord): DownloadRecord {
 }
 
 function parseByteRange(header: string, size: number) {
-  if (!header.startsWith("bytes=") || header.includes(",")) return null;
-  const [startPart, endPart] = header.slice(6).split("-");
+  if (!Number.isSafeInteger(size) || size <= 0 || !header.startsWith("bytes=") || header.includes(",")) return null;
+  const parts = header.slice(6).split("-");
+  if (parts.length !== 2) return null;
+  const [startPart, endPart] = parts;
 
   if (!startPart) {
+    if (!/^\d+$/.test(endPart)) return null;
     const suffixLength = Number.parseInt(endPart, 10);
-    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return null;
     return { start: Math.max(0, size - suffixLength), end: size - 1 };
   }
 
+  if (!/^\d+$/.test(startPart) || (endPart && !/^\d+$/.test(endPart))) return null;
   const start = Number.parseInt(startPart, 10);
   const requestedEnd = endPart ? Number.parseInt(endPart, 10) : size - 1;
-  if (!Number.isFinite(start) || !Number.isFinite(requestedEnd) || start < 0 || start >= size || requestedEnd < start) {
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(requestedEnd) ||
+    start < 0 ||
+    start >= size ||
+    requestedEnd < start
+  ) {
     return null;
   }
   return { start, end: Math.min(requestedEnd, size - 1) };

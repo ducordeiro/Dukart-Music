@@ -118,16 +118,8 @@ async function respondWithOfflineMedia(request) {
 
   const blob = await cached.blob();
   const size = blob.size;
-  const match = range.match(/bytes=(\d+)-(\d+)?/);
-
-  if (!match) {
-    return cached;
-  }
-
-  const start = Number(match[1]);
-  const end = match[2] ? Number(match[2]) : size - 1;
-
-  if (Number.isNaN(start) || Number.isNaN(end) || start >= size || end >= size) {
+  const parsedRange = parseByteRange(range, size);
+  if (!parsedRange) {
     return new Response(null, {
       status: 416,
       headers: {
@@ -135,6 +127,7 @@ async function respondWithOfflineMedia(request) {
       }
     });
   }
+  const { start, end } = parsedRange;
 
   const sliced = blob.slice(start, end + 1, cached.headers.get("content-type") || "audio/mpeg");
   return new Response(sliced, {
@@ -146,4 +139,35 @@ async function respondWithOfflineMedia(request) {
       "Accept-Ranges": "bytes"
     }
   });
+}
+
+function parseByteRange(header, size) {
+  if (!Number.isSafeInteger(size) || size <= 0 || !header.startsWith("bytes=") || header.includes(",")) {
+    return null;
+  }
+
+  const parts = header.slice(6).split("-");
+  if (parts.length !== 2) return null;
+  const [startPart, endPart] = parts;
+
+  if (!startPart) {
+    if (!/^\d+$/.test(endPart)) return null;
+    const suffixLength = Number.parseInt(endPart, 10);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return null;
+    return { start: Math.max(0, size - suffixLength), end: size - 1 };
+  }
+
+  if (!/^\d+$/.test(startPart) || (endPart && !/^\d+$/.test(endPart))) return null;
+  const start = Number.parseInt(startPart, 10);
+  const requestedEnd = endPart ? Number.parseInt(endPart, 10) : size - 1;
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(requestedEnd) ||
+    start < 0 ||
+    start >= size ||
+    requestedEnd < start
+  ) {
+    return null;
+  }
+  return { start, end: Math.min(requestedEnd, size - 1) };
 }

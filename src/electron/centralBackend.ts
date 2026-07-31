@@ -1,6 +1,7 @@
 import type {
   AuthResult,
   AuthUser,
+  DownloadRecord,
   UserLibrarySaveResult,
   UserLibrarySnapshot,
   UserPlaylist
@@ -86,6 +87,10 @@ export class CentralBackendClient {
 
   loadLibrary(): Promise<UserLibrarySnapshot> {
     return this.request("/api/library");
+  }
+
+  listDownloadHistory(): Promise<DownloadRecord[]> {
+    return this.request("/api/downloads/history");
   }
 
   async saveLibrary(playlists: UserPlaylist[], revision?: number): Promise<UserLibrarySaveResult> {

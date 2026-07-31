@@ -11,6 +11,7 @@ import type {
   YoutubeSearchResult
 } from "../shared/types";
 import { parseUserPlaylists } from "../shared/userLibrary";
+import { youtubeVideoId } from "../shared/youtube";
 
 export interface StoredUser extends AuthUser {
   usernameNormalized: string;
@@ -28,6 +29,7 @@ export class UserLibraryConflictError extends Error {
 export class AppDatabase {
   private SQL: SqlJsStatic | null = null;
   private db: Database | null = null;
+  private saveSequence = 0;
 
   constructor(
     private readonly dbPath: string,
@@ -272,6 +274,10 @@ export class AppDatabase {
   }
 
   findCompleted(url: string, type?: DownloadType, idUser?: number) {
+    const externalId = youtubeVideoId(url);
+    const whereMedia = externalId
+      ? "(m.source_url = ? OR m.external_id = ?)"
+      : "m.source_url = ?";
     const whereType = type ? "AND d.requested_type = ?" : "";
     const whereUser =
       idUser === undefined
@@ -286,7 +292,12 @@ export class AppDatabase {
                WHERE any_ud.id_download = d.id_download
              )
            )`;
-    const params: SqlValue[] = [url, ...(type ? [type] : []), ...(idUser === undefined ? [] : [idUser])];
+    const params: SqlValue[] = [
+      url,
+      ...(externalId ? [externalId] : []),
+      ...(type ? [type] : []),
+      ...(idUser === undefined ? [] : [idUser])
+    ];
     return this.getOne<DownloadRecord>(
       `SELECT d.id_download AS idDownload, m.source_url AS url, COALESCE(m.title, 'Untitled media') AS title,
               COALESCE(m.channel_name, '') AS channel, d.requested_type AS type, d.status,
@@ -296,7 +307,7 @@ export class AppDatabase {
        FROM download d
        JOIN media_source m ON m.id_media = d.id_media
        JOIN local_file lf ON lf.id_download = d.id_download
-       WHERE m.source_url = ? AND d.status = 'completed'
+       WHERE ${whereMedia} AND d.status = 'completed'
           AND (m.external_id IS NULL OR instr(lf.file_path, m.external_id) > 0)
           ${whereType}
           ${whereUser}
@@ -310,11 +321,16 @@ export class AppDatabase {
     return this.findCompleted(url, type);
   }
 
-  listDownloads(idUser?: number) {
+  listDownloads(idUser?: number, ownership: "legacy-compatible" | "strict" = "legacy-compatible") {
     const whereUser =
       idUser === undefined
         ? ""
-        : `WHERE EXISTS (
+        : ownership === "strict"
+          ? `WHERE EXISTS (
+               SELECT 1 FROM user_download ud
+               WHERE ud.id_download = d.id_download AND ud.id_user = ?
+             )`
+          : `WHERE EXISTS (
              SELECT 1 FROM user_download ud
              WHERE ud.id_download = d.id_download AND ud.id_user = ?
            )
@@ -336,6 +352,15 @@ export class AppDatabase {
         ${whereUser}
         ORDER BY d.created_at DESC`,
       idUser === undefined ? [] : [idUser]
+    );
+  }
+
+  listDownloadHistory(idUser?: number) {
+    const records = this.listDownloads(idUser, "strict");
+
+    return [...records].sort(
+      (left, right) =>
+        Date.parse(right.completedAt || right.createdAt) - Date.parse(left.completedAt || left.createdAt)
     );
   }
 
@@ -524,7 +549,10 @@ export class AppDatabase {
 
   private save() {
     fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
-    const temporaryPath = `${this.dbPath}.tmp`;
+    // A unique path avoids collisions between consecutive exports on Windows,
+    // where antivirus and sync filters may keep a just-renamed .tmp handle open.
+    this.saveSequence += 1;
+    const temporaryPath = `${this.dbPath}.${process.pid}.${this.saveSequence}.tmp`;
     fs.writeFileSync(temporaryPath, Buffer.from(this.requireDb().export()));
     try {
       fs.renameSync(temporaryPath, this.dbPath);

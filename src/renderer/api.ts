@@ -102,6 +102,21 @@ export const api = {
     if (window.esporteFai) return window.esporteFai.listDownloads();
     return request("/api/downloads");
   },
+  listDownloadHistory(): Promise<DownloadRecord[]> {
+    if (window.esporteFai) return window.esporteFai.listDownloadHistory();
+    return request("/api/downloads/history");
+  },
+  downloadFile(record: DownloadRecord): Promise<boolean> {
+    if (window.esporteFai) return window.esporteFai.downloadFile(record);
+    const link = document.createElement("a");
+    link.href = `/api/files/${record.idDownload}`;
+    link.download = record.fileName || "";
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    return Promise.resolve(true);
+  },
   findCompleted(url: string, type?: DownloadType): Promise<DownloadRecord | null> {
     if (window.esporteFai) return window.esporteFai.findCompleted(url, type);
     const params = new URLSearchParams({ url });

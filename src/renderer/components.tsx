@@ -6,10 +6,13 @@ import {
   ChevronUp,
   CornerDownLeft,
   Download,
+  FileDown,
   FolderPlus,
   Headphones,
   Heart,
   History,
+  House,
+  Library,
   ListMusic,
   Loader2,
   MoreVertical,
@@ -19,7 +22,6 @@ import {
   Plus,
   Repeat2,
   Search,
-  Settings,
   Shuffle,
   SkipBack,
   SkipForward,
@@ -31,6 +33,99 @@ import type { Status, UserPlaylist } from "./types";
 import { formatDateTime, formatMb, formatTime } from "./utils";
 
 function HomeView({
+  username,
+  recentTracks,
+  playlists,
+  playTrack,
+  openPlaylist,
+  openSettings
+}: {
+  username: string;
+  recentTracks: DownloadRecord[];
+  playlists: UserPlaylist[];
+  playTrack: (track: DownloadRecord) => void;
+  openPlaylist: (id: string) => void;
+  openSettings: () => void;
+}) {
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Bom dia" : hour < 18 ? "Boa tarde" : "Boa noite";
+
+  return (
+    <section className="home-view" aria-labelledby="home-greeting">
+      <header className="home-header">
+        <img className="home-logo" src="./esporte-fai-logo.png" alt="Esporte Fai" />
+        <div className="home-greeting">
+          <span id="home-greeting">{greeting}</span>
+          <strong>@{username}</strong>
+        </div>
+        <button className="avatar-button pressable" type="button" onClick={openSettings} title="Abrir configurações" aria-label="Abrir configurações">
+          {username.slice(0, 1).toUpperCase()}
+        </button>
+      </header>
+
+      <section className="home-section" aria-labelledby="recent-title">
+        <div className="section-heading">
+          <div>
+            <span className="section-eyebrow">Continue ouvindo</span>
+            <h2 id="recent-title">Últimas músicas ouvidas</h2>
+          </div>
+        </div>
+        {recentTracks.length ? (
+          <div className="recent-grid">
+            {recentTracks.slice(0, 4).map((track) => (
+              <button className="recent-card pressable" type="button" key={track.idDownload} onClick={() => playTrack(track)}>
+                <span className={`recent-art ${track.type}`} aria-hidden="true">
+                  {track.type === "video" ? <Video size={24} /> : <Headphones size={24} />}
+                </span>
+                <span className="recent-copy">
+                  <strong>{track.title}</strong>
+                  <small>{track.channel || "Esporte Fai"}</small>
+                </span>
+                <Play className="recent-play" fill="currentColor" size={16} aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state home-empty">
+            <Headphones size={26} />
+            <strong>Nenhuma música ouvida ainda</strong>
+            <span>Use a aba Buscar para encontrar ou baixar sua primeira faixa.</span>
+          </div>
+        )}
+      </section>
+
+      <section className="home-section" aria-labelledby="home-playlists-title">
+        <div className="section-heading">
+          <div>
+            <span className="section-eyebrow">Feitas por você</span>
+            <h2 id="home-playlists-title">Suas playlists</h2>
+          </div>
+        </div>
+        {playlists.length ? (
+          <div className="home-playlist-carousel">
+            {playlists.map((playlist) => (
+              <button className="home-playlist-card pressable" type="button" key={playlist.id} onClick={() => openPlaylist(playlist.id)}>
+                <span className={`home-playlist-cover ${playlist.special ? "liked" : ""}`}>
+                  <PlaylistCoverContent playlist={playlist} iconSize={30} />
+                </span>
+                <strong>{playlist.name}</strong>
+                <small>{playlist.itemIds.length} itens</small>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state home-empty">
+            <ListMusic size={26} />
+            <strong>Sua biblioteca está vazia</strong>
+            <span>Crie playlists para encontrá-las rapidamente aqui.</span>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function SearchView({
   url,
   setUrl,
   validUrl,
@@ -39,6 +134,7 @@ function HomeView({
   musicResults,
   musicSearchLoading,
   musicSearchError,
+  recentSearches,
   selectedMusic,
   runMusicSearch,
   selectMusic,
@@ -50,8 +146,8 @@ function HomeView({
   message,
   startDownload,
   playLatest,
-  openPlaylists,
-  openSettings
+  cancelSearch,
+  removeRecentSearch
 }: {
   url: string;
   setUrl: (value: string) => void;
@@ -61,6 +157,7 @@ function HomeView({
   musicResults: YoutubeSearchResult[];
   musicSearchLoading: boolean;
   musicSearchError: string;
+  recentSearches: YoutubeSearchResult[];
   selectedMusic: YoutubeSearchResult | null;
   runMusicSearch: () => void;
   selectMusic: (result: YoutubeSearchResult) => void;
@@ -72,10 +169,15 @@ function HomeView({
   message: string;
   startDownload: (type: DownloadType) => void;
   playLatest: () => void;
-  openPlaylists: () => void;
-  openSettings: () => void;
+  cancelSearch: () => void;
+  removeRecentSearch: (videoId: string) => void;
 }) {
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    searchInputRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (musicResults.length > 0) {
@@ -84,15 +186,19 @@ function HomeView({
   }, [musicResults]);
 
   return (
-    <section className="main-panel" aria-label="Download panel">
+    <section className="main-panel search-view" aria-label="Buscar e baixar músicas">
+      <header className="search-page-header">
+        <div>
+          <span className="section-eyebrow">Descobrir</span>
+          <h1>Buscar</h1>
+        </div>
+      </header>
       <div className="music-search-panel">
-        <label className="music-search-label" htmlFor="music-search-input">
-          Buscar ou inserir o link (youtube)
-        </label>
         <div className="music-search-row">
           <div className="music-search-box">
             <Search size={18} />
             <input
+              ref={searchInputRef}
               id="music-search-input"
               type="text"
               value={musicSearch}
@@ -103,7 +209,7 @@ function HomeView({
                   runMusicSearch();
                 }
               }}
-              placeholder="Digite o nome da musica"
+              placeholder="O que você quer ouvir?"
               disabled={musicSearchLoading}
             />
           </div>
@@ -117,6 +223,16 @@ function HomeView({
               </>
             )}
           </button>
+          <button
+            className="search-cancel pressable"
+            type="button"
+            onClick={() => {
+              cancelSearch();
+              searchInputRef.current?.blur();
+            }}
+          >
+            Cancelar
+          </button>
         </div>
 
         {(musicSearchLoading || musicSearchError) && (
@@ -125,7 +241,7 @@ function HomeView({
           </p>
         )}
 
-        {musicResults.length > 0 && (
+        {musicSearch.trim() && musicResults.length > 0 && (
           <div className="music-results-toolbar">
             <button
               className="small-toggle-button pressable"
@@ -140,7 +256,7 @@ function HomeView({
           </div>
         )}
 
-        {musicResults.length > 0 && !resultsCollapsed && (
+        {musicSearch.trim() && musicResults.length > 0 && !resultsCollapsed && (
           <div className="music-result-list">
             {musicResults.map((result) => {
               const selected = selectedMusic?.videoId === result.videoId;
@@ -165,6 +281,46 @@ function HomeView({
             })}
           </div>
         )}
+      </div>
+
+      {!musicSearch.trim() && !musicSearchLoading && (
+        <section className="recent-searches" aria-labelledby="recent-searches-title">
+          <div className="recent-searches-heading">
+            <History size={18} />
+            <h2 id="recent-searches-title">Buscas recentes</h2>
+          </div>
+          {recentSearches.length ? (
+            <div className="recent-search-list">
+              {recentSearches.map((result) => (
+                <article className="recent-search-row" key={result.videoId}>
+                  <button className="recent-search-main pressable" type="button" onClick={() => selectMusic(result)}>
+                    {result.thumbnail ? <img src={result.thumbnail} alt="" /> : <span className="music-result-fallback"><Headphones size={19} /></span>}
+                    <span>
+                      <strong>{result.titulo}</strong>
+                      <small>Música · {result.canal || "YouTube"}</small>
+                    </span>
+                  </button>
+                  <button className="recent-search-remove pressable" type="button" onClick={() => removeRecentSearch(result.videoId)} title="Remover busca recente" aria-label={`Remover ${result.titulo} das buscas recentes`}>
+                    <X size={18} />
+                  </button>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="search-placeholder-state">
+              <Search size={20} />
+              <div>
+                <strong>Nenhuma busca recente</strong>
+                <span>As músicas que você selecionar nesta sessão aparecerão aqui.</span>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      <div className="download-section-heading">
+        <span className="section-eyebrow">Download direto</span>
+        <h2>Baixar por link</h2>
       </div>
 
       <div className="input-group">
@@ -214,16 +370,6 @@ function HomeView({
           onClick={playLatest}
         />
       </div>
-
-      <button className="playlist-button pressable" onClick={openPlaylists}>
-        <ListMusic size={24} />
-        PLAYLIST
-      </button>
-
-      <button className="settings-button pressable" onClick={openSettings}>
-        <Settings size={21} />
-        CONFIGURACOES
-      </button>
 
       <div className="message" role="status">
         {message}
@@ -329,31 +475,51 @@ function PlaylistCoverButton({
 function PlaylistsView({
   playlists,
   downloads,
-  openMain,
+  username,
   openPlaylist,
   createPlaylist,
   updatePlaylistCover
 }: {
   playlists: UserPlaylist[];
   downloads: DownloadRecord[];
-  openMain: () => void;
+  username: string;
   openPlaylist: (id: string) => void;
   createPlaylist: () => void;
   updatePlaylistCover: (playlistId: string, file: File) => void;
 }) {
+  const [librarySearchOpen, setLibrarySearchOpen] = useState(false);
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const visiblePlaylists = playlists.filter((playlist) => playlist.name.toLowerCase().includes(libraryQuery.trim().toLowerCase()));
+
   return (
     <section className="library-view">
-      <div className="screen-topbar">
-        <button className="icon-button pressable" onClick={openMain} title="Voltar">
-          <ArrowLeft size={22} />
-        </button>
-        <h2>Playlists</h2>
-        <button className="icon-button pressable" onClick={createPlaylist} title="Nova playlist">
-          <Plus size={22} />
-        </button>
+      <div className="library-header">
+        <div>
+          <span className="section-eyebrow">Coleção</span>
+          <h1>Sua Biblioteca</h1>
+        </div>
+        <div className="library-header-actions">
+          <button className="icon-button pressable" type="button" onClick={() => setLibrarySearchOpen((value) => !value)} title="Buscar na biblioteca" aria-expanded={librarySearchOpen}>
+            <Search size={21} />
+          </button>
+          <button className="avatar-button pressable" type="button" title={`Usuário @${username}`} aria-label={`Usuário @${username}`}>
+            {username.slice(0, 1).toUpperCase()}
+          </button>
+        </div>
+      </div>
+      {librarySearchOpen && (
+        <label className="library-search-box">
+          <Search size={18} />
+          <input autoFocus value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Buscar na sua biblioteca" />
+          {libraryQuery && <button className="library-search-clear" type="button" onClick={() => setLibraryQuery("")} title="Limpar busca"><X size={17} /></button>}
+        </label>
+      )}
+      <div className="library-toolbar">
+        <span>{visiblePlaylists.length} {visiblePlaylists.length === 1 ? "playlist" : "playlists"}</span>
+        <button className="library-create pressable" type="button" onClick={createPlaylist}><Plus size={18} /> Nova playlist</button>
       </div>
       <div className="playlist-grid">
-        {playlists.map((playlist) => {
+        {visiblePlaylists.map((playlist) => {
           const items = downloads.filter((item) => playlist.itemIds.includes(item.idDownload));
           const audioCount =
             playlist.items?.filter((item) => item.type === "audio").length ??
@@ -389,6 +555,13 @@ function PlaylistsView({
           );
         })}
       </div>
+      {visiblePlaylists.length === 0 && (
+        <div className="empty-state library-empty">
+          <Search size={24} />
+          <strong>Nenhum item encontrado</strong>
+          <span>Tente outro nome ou crie uma nova playlist.</span>
+        </div>
+      )}
       <button className="fab pressable" onClick={createPlaylist} title="Nova playlist">
         <Plus size={28} />
       </button>
@@ -411,6 +584,12 @@ function PlaylistDetailView({
   currentTrack,
   offlineAudioIds,
   offlineBusyId,
+  offlinePlaylistBusy,
+  offlinePlaylistComplete,
+  offlinePlaylistProgress,
+  offlinePlaylistTotal,
+  offlineSupported,
+  togglePlaylistOffline,
   saveAudioOffline,
   removeAudioOffline,
   syncedDownloadBusyKey,
@@ -431,6 +610,12 @@ function PlaylistDetailView({
   currentTrack: DownloadRecord | null;
   offlineAudioIds: number[];
   offlineBusyId: number | null;
+  offlinePlaylistBusy: boolean;
+  offlinePlaylistComplete: boolean;
+  offlinePlaylistProgress: { mode: "saving" | "removing"; completed: number; total: number } | null;
+  offlinePlaylistTotal: number;
+  offlineSupported: boolean;
+  togglePlaylistOffline: () => void;
   saveAudioOffline: (track: DownloadRecord) => void;
   removeAudioOffline: (track: DownloadRecord) => void;
   syncedDownloadBusyKey: string | null;
@@ -455,6 +640,37 @@ function PlaylistDetailView({
           <span>{totalTracks} musicas</span>
         </div>
         <div className="hero-actions">
+          <button
+            className={`playlist-offline-button pressable ${offlinePlaylistComplete ? "saved" : ""}`}
+            type="button"
+            onClick={togglePlaylistOffline}
+            disabled={!offlineSupported || !offlinePlaylistTotal || offlinePlaylistBusy}
+            aria-pressed={offlinePlaylistComplete}
+            title={
+              !offlineSupported
+                ? "Disponivel no PWA ou navegador"
+                : !offlinePlaylistTotal
+                  ? "Nenhum audio disponivel para uso offline"
+                : offlinePlaylistComplete
+                  ? "Remover playlist do offline"
+                  : "Baixar playlist para ouvir offline"
+            }
+          >
+            {offlinePlaylistBusy ? (
+              <Loader2 className="spin" size={18} />
+            ) : offlinePlaylistComplete ? (
+              <Check size={18} />
+            ) : (
+              <Download size={18} />
+            )}
+            <span>
+              {offlinePlaylistProgress
+                ? `${offlinePlaylistProgress.mode === "saving" ? "Baixando" : "Removendo"} ${offlinePlaylistProgress.completed}/${offlinePlaylistProgress.total}`
+                : offlinePlaylistComplete
+                  ? "Offline"
+                  : "Baixar"}
+            </span>
+          </button>
           <button className="shuffle-button pressable" onClick={shuffle} disabled={!playableTracks} title="Embaralhar playlist">
             <Shuffle size={20} />
           </button>
@@ -493,7 +709,7 @@ function PlaylistDetailView({
                         offlineSaved ? removeAudioOffline(track) : saveAudioOffline(track);
                       }}
                       title={offlineSaved ? "Remover offline" : "Salvar offline"}
-                      disabled={offlineBusy}
+                      disabled={offlineBusy || offlinePlaylistBusy}
                     >
                       {offlineBusy ? <Loader2 className="spin" size={17} /> : offlineSaved ? <Check size={17} /> : <Download size={17} />}
                     </button>
@@ -532,6 +748,7 @@ function PlaylistDetailView({
 
 function PlayerView({
   track,
+  artwork,
   isPlaying,
   currentTime,
   duration,
@@ -549,6 +766,8 @@ function PlayerView({
   offlineBusy,
   saveOffline,
   removeOffline,
+  downloadFile,
+  fileDownloadBusy,
   mediaRef,
   mediaUrl,
   onTimeUpdate,
@@ -558,6 +777,7 @@ function PlayerView({
   onEnded
 }: {
   track: DownloadRecord | null;
+  artwork: string;
   isPlaying: boolean;
   currentTime: number;
   duration: number;
@@ -575,6 +795,8 @@ function PlayerView({
   offlineBusy: boolean;
   saveOffline: () => void;
   removeOffline: () => void;
+  downloadFile: () => void;
+  fileDownloadBusy: boolean;
   mediaRef: React.MutableRefObject<HTMLMediaElement | null>;
   mediaUrl: string;
   onTimeUpdate: (time: number) => void;
@@ -609,6 +831,14 @@ function PlayerView({
           <button className="icon-button pressable" onClick={openAddSheet} title="Adicionar a playlist">
             <FolderPlus size={23} />
           </button>
+          <button
+            className="icon-button pressable file-download-top"
+            onClick={downloadFile}
+            title={`Baixar arquivo ${track?.type === "video" ? "MP4" : "MP3"} no dispositivo`}
+            disabled={!track || fileDownloadBusy}
+          >
+            {fileDownloadBusy ? <Loader2 className="spin" size={20} /> : <FileDown size={21} />}
+          </button>
           {track?.type === "audio" && (
             <button
               className={`icon-button pressable offline-top ${isOfflineSaved ? "saved" : ""}`}
@@ -633,8 +863,8 @@ function PlayerView({
         />
       ) : (
         <>
-          <button className="album-art pressable" onDoubleClick={toggleFavorite} title="Toque duplo para favoritar">
-            <MusicGlyph />
+          <button className={`album-art pressable ${artwork ? "has-image" : ""}`} onDoubleClick={toggleFavorite} title="Toque duplo para favoritar">
+            {artwork ? <img className="album-art-image" src={artwork} alt="Capa da playlist atual" /> : <MusicGlyph />}
           </button>
         </>
       )}
@@ -686,21 +916,56 @@ function PlayerView({
 
 function PlayerReturnTab({
   track,
+  artwork,
   isPlaying,
-  openPlayer
+  currentTime,
+  duration,
+  openPlayer,
+  togglePlayback
 }: {
   track: DownloadRecord;
+  artwork: string;
   isPlaying: boolean;
+  currentTime: number;
+  duration: number;
   openPlayer: () => void;
+  togglePlayback: () => void;
 }) {
+  const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   return (
-    <button className="player-return-tab pressable" type="button" onClick={openPlayer}>
-      <span className="player-return-icon">{isPlaying ? <AudioBars /> : <Play fill="currentColor" size={18} />}</span>
-      <span>
-        <strong>Voltar ao player</strong>
-        <small>{track.title}</small>
-      </span>
-    </button>
+    <section className="player-return-tab" aria-label="Miniplayer">
+      <button className="mini-player-main pressable" type="button" onClick={openPlayer}>
+        <span className={`player-return-icon ${artwork ? "has-image" : ""}`}>
+          {artwork ? <img src={artwork} alt="" /> : isPlaying ? <AudioBars /> : track.type === "video" ? <Video size={19} /> : <Headphones size={19} />}
+        </span>
+        <span className="mini-player-copy">
+          <strong>{track.title}</strong>
+          <small>{track.channel || "Esporte Fai"}</small>
+        </span>
+      </button>
+      <button className="mini-player-toggle pressable" type="button" onClick={togglePlayback} title={isPlaying ? "Pausar" : "Reproduzir"} aria-label={isPlaying ? "Pausar" : "Reproduzir"}>
+        {isPlaying ? <Pause fill="currentColor" size={21} /> : <Play fill="currentColor" size={21} />}
+      </button>
+      <span className="mini-player-progress" aria-hidden="true"><i style={{ width: `${progress}%` }} /></span>
+    </section>
+  );
+}
+
+function BottomNavigation({ activeView, navigate }: { activeView: "main" | "search" | "playlists"; navigate: (view: "main" | "search" | "playlists") => void }) {
+  const items = [
+    { id: "main" as const, label: "Início", icon: <House size={22} /> },
+    { id: "search" as const, label: "Buscar", icon: <Search size={22} /> },
+    { id: "playlists" as const, label: "Sua Biblioteca", icon: <Library size={22} /> }
+  ];
+  return (
+    <nav className="bottom-navigation" aria-label="Navegação principal">
+      {items.map((item) => (
+        <button className={`bottom-nav-item pressable ${activeView === item.id ? "active" : ""}`} type="button" key={item.id} onClick={() => navigate(item.id)} aria-current={activeView === item.id ? "page" : undefined}>
+          {item.icon}
+          <span>{item.label}</span>
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -708,6 +973,9 @@ function SettingsView({
   username,
   downloads,
   historyLoaded,
+  historyLoading,
+  historyError,
+  fullHistory,
   allBlack,
   installState,
   installHelp,
@@ -718,11 +986,16 @@ function SettingsView({
   closeHistory,
   toggleAllBlack,
   playTrack,
+  downloadFile,
+  fileDownloadBusyId,
   logout
 }: {
   username: string;
   downloads: DownloadRecord[];
   historyLoaded: boolean;
+  historyLoading: boolean;
+  historyError: string;
+  fullHistory: boolean;
   allBlack: boolean;
   installState: "available" | "installing" | "installed" | "ios" | "manual";
   installHelp: "ios" | "browser" | null;
@@ -733,9 +1006,11 @@ function SettingsView({
   closeHistory: () => void;
   toggleAllBlack: () => void;
   playTrack: (track: DownloadRecord) => void;
+  downloadFile: (track: DownloadRecord) => void;
+  fileDownloadBusyId: number | null;
   logout: () => Promise<void>;
 }) {
-  const completed = downloads.filter((item) => item.status === "completed" && item.filePath);
+  const completed = downloads.filter((item) => item.status === "completed");
   const [logoutBusy, setLogoutBusy] = useState(false);
 
   useEffect(() => {
@@ -913,27 +1188,41 @@ function SettingsView({
         </span>
         <span>
           <strong>Historico de musicas baixadas</strong>
-          <small>Carregar arquivos salvos anteriormente</small>
+          <small>{fullHistory ? "Visualizar todos os downloads do aplicativo" : "Visualizar somente os downloads desta conta"}</small>
         </span>
+        {historyLoading && <Loader2 className="spin" size={19} />}
       </button>
 
       {historyLoaded && (
         <div className="settings-history">
           <div className="settings-history-header">
-            <strong>Historico</strong>
+            <strong>{fullHistory ? "Historico completo" : "Seu historico"}</strong>
             <button className="small-toggle-button pressable" type="button" onClick={closeHistory} title="Ocultar historico">
               <X size={15} />
               <span>Ocultar</span>
             </button>
           </div>
-          {completed.length === 0 ? (
+          {historyLoading ? (
+            <div className="empty-state history-loading-state">
+              <Loader2 className="spin" size={25} />
+              <strong>Carregando historico...</strong>
+            </div>
+          ) : historyError ? (
+            <div className="empty-state">
+              <strong>Nao foi possivel carregar o historico.</strong>
+              <span>{historyError}</span>
+            </div>
+          ) : completed.length === 0 ? (
             <div className="empty-state">
               <strong>Nenhuma musica baixada.</strong>
               <span>Os downloads concluidos vao aparecer aqui.</span>
             </div>
           ) : (
             completed.map((track) => (
-              <button className="history-row pressable" key={track.idDownload} type="button" onClick={() => playTrack(track)}>
+              <div
+                className="history-row pressable"
+                key={track.idDownload}
+              >
                 <div className="track-art">{track.type === "video" ? <Video size={20} /> : <Headphones size={20} />}</div>
                 <div>
                   <strong>{track.title}</strong>
@@ -941,8 +1230,27 @@ function SettingsView({
                     {track.type === "video" ? "Video" : "Audio"} - {formatDateTime(track.completedAt || track.createdAt)}
                   </span>
                 </div>
-                <Play size={19} fill="currentColor" />
-              </button>
+                <div className="history-actions">
+                  <button
+                    className="history-action pressable"
+                    type="button"
+                    onClick={() => playTrack(track)}
+                    disabled={!track.filePath}
+                    title={track.filePath ? "Reproduzir" : "Arquivo disponivel somente em outro dispositivo"}
+                  >
+                    {track.filePath ? <Play size={18} fill="currentColor" /> : <History size={18} />}
+                  </button>
+                  <button
+                    className="history-action download pressable"
+                    type="button"
+                    onClick={() => downloadFile(track)}
+                    disabled={!track.filePath || fileDownloadBusyId === track.idDownload}
+                    title={`Baixar ${track.type === "video" ? "MP4" : "MP3"} no dispositivo`}
+                  >
+                    {fileDownloadBusyId === track.idDownload ? <Loader2 className="spin" size={18} /> : <FileDown size={18} />}
+                  </button>
+                </div>
+              </div>
             ))
           )}
         </div>
@@ -1054,4 +1362,4 @@ function MusicGlyph() {
   );
 }
 
-export { HomeView, PlaylistsView, PlaylistDetailView, PlayerView, PlayerReturnTab, SettingsView, BottomSheet, Modal };
+export { HomeView, SearchView, PlaylistsView, PlaylistDetailView, PlayerView, PlayerReturnTab, BottomNavigation, SettingsView, BottomSheet, Modal };

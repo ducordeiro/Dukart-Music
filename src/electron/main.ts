@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { normalizeUsername, verifyPassword } from "./auth";
@@ -21,6 +22,7 @@ let centralSessionStore: CentralSessionStore;
 let activeUser: AuthUser | null = null;
 let legacyLibraryForActiveUser: UserPlaylist[] | null = null;
 const activeDesktopDownloads = new Set<string>();
+const FULL_HISTORY_USERNAME = normalizeUsername(process.env.ESPORTE_FAI_HISTORY_ADMIN_USERNAME || "tocagando1234");
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -199,6 +201,19 @@ ipcMain.handle("downloads:list", async () => {
   return database.listDownloads(user.idUser);
 });
 
+ipcMain.handle("downloads:history", async () => {
+  const user = requireDesktopAuth();
+  if (normalizeUsername(user.username) !== FULL_HISTORY_USERNAME) {
+    return database.listDownloadHistory(user.idUser);
+  }
+
+  const remoteHistory = await centralRequest(() => centralBackend.listDownloadHistory());
+  return remoteHistory.map((record) => {
+    const localRecord = database.findCompleted(record.url, record.type, user.idUser);
+    return localRecord?.filePath ? localRecord : { ...record, filePath: null };
+  });
+});
+
 ipcMain.handle("music:search", async (_event, query: string) => {
   requireDesktopAuth();
   const normalized = normalizeYoutubeSearchQuery(query || "");
@@ -267,6 +282,36 @@ ipcMain.handle("files:play", async (_event, filePath: string) => {
   const result = await shell.openPath(download.filePath);
   if (result) {
     throw new Error(result);
+  }
+  return true;
+});
+
+ipcMain.handle("files:save-copy", async (_event, record: { idDownload?: number }) => {
+  const user = requireDesktopAuth();
+  const idDownload = Number(record?.idDownload);
+  if (!Number.isSafeInteger(idDownload) || idDownload <= 0) {
+    throw new Error("Arquivo invalido.");
+  }
+  const source = database.getDownload(
+    idDownload,
+    normalizeUsername(user.username) === FULL_HISTORY_USERNAME ? undefined : user.idUser
+  );
+  if (!source?.filePath || !fs.existsSync(source.filePath)) {
+    throw new Error("Este arquivo nao esta disponivel neste computador.");
+  }
+
+  const extension = source.type === "video" ? "mp4" : "mp3";
+  const saveOptions = {
+    title: "Salvar arquivo no dispositivo",
+    defaultPath: path.join(app.getPath("downloads"), source.fileName || path.basename(source.filePath)),
+    filters: [{ name: source.type === "video" ? "Video MP4" : "Audio MP3", extensions: [extension] }]
+  };
+  const result = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, saveOptions)
+    : await dialog.showSaveDialog(saveOptions);
+  if (result.canceled || !result.filePath) return false;
+  if (path.resolve(result.filePath) !== path.resolve(source.filePath)) {
+    fs.copyFileSync(source.filePath, result.filePath);
   }
   return true;
 });

@@ -16,7 +16,7 @@ import {
 } from "../shared/userLibrary";
 import { api } from "./api";
 import { AuthView } from "./AuthView";
-import { BottomSheet, HomeView, Modal, PlayerReturnTab, PlayerView, PlaylistDetailView, PlaylistsView, SettingsView } from "./components";
+import { BottomNavigation, BottomSheet, HomeView, Modal, PlayerReturnTab, PlayerView, PlaylistDetailView, PlaylistsView, SearchView, SettingsView } from "./components";
 import { LIKED_ID, THEME_KEY } from "./constants";
 import { hasLegacyLibrary, likedPlaylist, loadLegacyLibrary, removeLegacyLibrary } from "./library";
 import {
@@ -112,6 +112,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   const [musicSearchLoading, setMusicSearchLoading] = useState(false);
   const [musicSearchError, setMusicSearchError] = useState("");
   const [selectedMusic, setSelectedMusic] = useState<YoutubeSearchResult | null>(null);
+  const [recentSearches, setRecentSearches] = useState<YoutubeSearchResult[]>([]);
   const [playableDownload, setPlayableDownload] = useState<DownloadRecord | null>(null);
   const [view, setView] = useState<View>("main");
   const [previousView, setPreviousView] = useState<View>("playlists");
@@ -134,6 +135,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   const skipNextLibrarySaveRef = useRef(false);
   const [queue, setQueue] = useState<DownloadRecord[]>([]);
   const [currentTrack, setCurrentTrack] = useState<DownloadRecord | null>(null);
+  const [queueArtwork, setQueueArtwork] = useState("");
   const [playbackMediaUrl, setPlaybackMediaUrl] = useState("");
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -146,9 +148,18 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   const [search, setSearch] = useState("");
   const [repeatQueue, setRepeatQueue] = useState(false);
   const [settingsHistoryLoaded, setSettingsHistoryLoaded] = useState(false);
+  const [settingsHistoryDownloads, setSettingsHistoryDownloads] = useState<DownloadRecord[]>([]);
+  const [settingsHistoryLoading, setSettingsHistoryLoading] = useState(false);
+  const [settingsHistoryError, setSettingsHistoryError] = useState("");
+  const [fileDownloadBusyId, setFileDownloadBusyId] = useState<number | null>(null);
   const [allBlack, setAllBlack] = useState(() => localStorage.getItem(THEME_KEY) === "true");
   const [offlineAudioIds, setOfflineAudioIds] = useState<number[]>(() => readOfflineAudioIds(authUser.idUser));
   const [offlineBusyId, setOfflineBusyId] = useState<number | null>(null);
+  const [offlinePlaylistProgress, setOfflinePlaylistProgress] = useState<{
+    mode: "saving" | "removing";
+    completed: number;
+    total: number;
+  } | null>(null);
   const [syncedDownloadBusyKey, setSyncedDownloadBusyKey] = useState<string | null>(null);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(() => deferredInstallPrompt);
   const [appInstalled, setAppInstalled] = useState(() => installedFromBrowserEvent || isRunningAsInstalledApp());
@@ -157,10 +168,22 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
   const validUrl = useMemo(() => isValidUrl(url), [url]);
   const completedDownloads = useMemo(() => downloads.filter((item) => item.status === "completed" && item.filePath), [downloads]);
+  const recentTracks = useMemo(
+    () => [...completedDownloads].sort((left, right) => Date.parse(right.completedAt || right.createdAt) - Date.parse(left.completedAt || left.createdAt)).slice(0, 4),
+    [completedDownloads]
+  );
   const selectedPlaylist = playlists.find((playlist) => playlist.id === selectedPlaylistId) || playlists[0] || likedPlaylist();
   const selectedTracks = completedDownloads.filter((item) => playlistContainsDownload(selectedPlaylist, item));
   const selectedTrackKeys = new Set(selectedTracks.map((track) => playlistTrackKey(track.url, track.type)));
   const unavailableSyncedTracks = (selectedPlaylist.items || []).filter((item) => !selectedTrackKeys.has(item.key));
+  const selectedAudioTracks = selectedTracks.filter((track) => track.type === "audio");
+  const unavailableSyncedAudioTracks = unavailableSyncedTracks.filter((track) => track.type === "audio");
+  const playlistOfflineTotal = selectedAudioTracks.length + unavailableSyncedAudioTracks.length;
+  const playlistOfflineSaved = selectedAudioTracks.filter((track) => offlineAudioIds.includes(track.idDownload)).length;
+  const playlistOfflineComplete =
+    playlistOfflineTotal > 0 &&
+    unavailableSyncedAudioTracks.length === 0 &&
+    playlistOfflineSaved === selectedAudioTracks.length;
   const filteredTracks = selectedTracks.filter((item) => {
     const needle = `${item.title} ${item.channel}`.toLowerCase();
     return needle.includes(search.toLowerCase());
@@ -617,6 +640,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
   function selectMusic(result: YoutubeSearchResult) {
     setSelectedMusic(result);
+    setRecentSearches((current) => [result, ...current.filter((item) => item.videoId !== result.videoId)].slice(0, 8));
     setUrl(youtubeUrl(result.videoId));
     setMusicSearchError("");
     setMessage(`Selecionado: ${result.titulo}`);
@@ -635,7 +659,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       if (existing?.filePath) {
         const openExisting = window.confirm("Este link ja foi baixado. Reproduzir o arquivo existente?");
         if (openExisting) {
-          startQueue([existing], 0);
+          startQueue([existing], 0, true, "");
           return;
         }
       }
@@ -713,7 +737,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   async function playLatest() {
     if (!validUrl) return;
     if (playableDownload?.filePath) {
-      startQueue([playableDownload], 0);
+      startQueue([playableDownload], 0, true, "");
       return;
     }
     const existing = await api.findCompleted(url);
@@ -721,14 +745,15 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       setMessage("Baixe o audio ou video antes de reproduzir.");
       return;
     }
-    startQueue([existing], 0);
+    startQueue([existing], 0, true, "");
   }
 
-  function startQueue(nextQueue: DownloadRecord[], index: number, openPlayer = true) {
+  function startQueue(nextQueue: DownloadRecord[], index: number, openPlayer = true, artwork?: string) {
     if (!nextQueue.length) return;
     const target = nextQueue[index] || nextQueue[0];
     setQueue(nextQueue);
     setCurrentTrack(target);
+    if (artwork !== undefined) setQueueArtwork(artwork);
     setPlaybackMediaUrl(mediaUrlForTrack(target));
     setCurrentTime(0);
     desiredPlaybackRef.current = true;
@@ -752,7 +777,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
   function togglePlayback() {
     if (!currentTrack) {
-      if (completedDownloads[0]) startQueue(completedDownloads, 0);
+      if (completedDownloads[0]) startQueue(completedDownloads, 0, true, "");
       return;
     }
 
@@ -915,8 +940,32 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
   }
 
   async function loadSettingsHistory() {
-    await refreshDownloads();
     setSettingsHistoryLoaded(true);
+    setSettingsHistoryLoading(true);
+    setSettingsHistoryError("");
+    try {
+      setSettingsHistoryDownloads(await api.listDownloadHistory());
+    } catch (error) {
+      setSettingsHistoryDownloads([]);
+      setSettingsHistoryError(error instanceof Error ? error.message : "Nao foi possivel carregar o historico.");
+    } finally {
+      setSettingsHistoryLoading(false);
+    }
+  }
+
+  async function downloadFileToDevice(track: DownloadRecord) {
+    if (fileDownloadBusyId !== null) return;
+    setFileDownloadBusyId(track.idDownload);
+    try {
+      const saved = await api.downloadFile(track);
+      if (saved) {
+        setMessage(window.esporteFai ? "Arquivo salvo no dispositivo." : "Download do arquivo iniciado.");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nao foi possivel baixar o arquivo.");
+    } finally {
+      setFileDownloadBusyId(null);
+    }
   }
 
   function openSettings() {
@@ -998,6 +1047,120 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
     }
   }
 
+  async function togglePlaylistOffline() {
+    if (offlinePlaylistProgress) return;
+    if (window.esporteFai) {
+      setMessage("O modo offline de playlists esta disponivel no PWA ou navegador.");
+      return;
+    }
+    if (!playlistOfflineTotal) {
+      setMessage("Esta playlist nao possui audios disponiveis para uso offline.");
+      return;
+    }
+
+    if (playlistOfflineComplete) {
+      const confirmed = window.confirm(`Remover as ${playlistOfflineSaved} musicas offline desta playlist?`);
+      if (!confirmed) return;
+
+      const removedIds: number[] = [];
+      let failures = 0;
+      setOfflinePlaylistProgress({ mode: "removing", completed: 0, total: selectedAudioTracks.length });
+      try {
+        for (const track of selectedAudioTracks) {
+          setOfflineBusyId(track.idDownload);
+          try {
+            await removeTrackOffline(track, authUser.idUser);
+            removedIds.push(track.idDownload);
+          } catch {
+            failures += 1;
+          } finally {
+            setOfflinePlaylistProgress((current) =>
+              current ? { ...current, completed: current.completed + 1 } : current
+            );
+          }
+        }
+        setOfflineAudioIds((current) => current.filter((id) => !removedIds.includes(id)));
+        setMessage(
+          failures
+            ? `${removedIds.length} musicas removidas do offline; ${failures} nao puderam ser removidas.`
+            : "Playlist removida do offline neste aparelho."
+        );
+      } finally {
+        setOfflineBusyId(null);
+        setOfflinePlaylistProgress(null);
+      }
+      return;
+    }
+
+    const missingLocalTracks = selectedAudioTracks.filter((track) => !offlineAudioIds.includes(track.idDownload));
+    const tracksToPrepare = unavailableSyncedAudioTracks;
+    const operationTotal = missingLocalTracks.length + tracksToPrepare.length;
+    let saved = 0;
+    let failures = 0;
+    setOfflinePlaylistProgress({ mode: "saving", completed: 0, total: operationTotal });
+
+    const markCompleted = () => {
+      setOfflinePlaylistProgress((current) =>
+        current ? { ...current, completed: current.completed + 1 } : current
+      );
+    };
+    const cacheTrack = async (track: DownloadRecord) => {
+      setOfflineBusyId(track.idDownload);
+      await saveTrackOffline(track, authUser.idUser);
+      upsertOfflineRecord(track, authUser.idUser);
+      setOfflineAudioIds((current) =>
+        current.includes(track.idDownload) ? current : [...current, track.idDownload]
+      );
+      saved += 1;
+    };
+
+    try {
+      for (const track of missingLocalTracks) {
+        try {
+          await cacheTrack(track);
+        } catch {
+          failures += 1;
+        } finally {
+          markCompleted();
+        }
+      }
+
+      for (const syncedTrack of tracksToPrepare) {
+        setSyncedDownloadBusyKey(syncedTrack.key);
+        try {
+          let localTrack = await api.findCompleted(syncedTrack.url, syncedTrack.type);
+          if (!localTrack?.filePath) {
+            const startedDownload = await api.startDownload(syncedTrack.url, syncedTrack.type);
+            if (!startedDownload.filePath) {
+              await waitForWebDownload(startedDownload.idDownload, syncedTrack.type);
+            }
+            localTrack = await api.findCompleted(syncedTrack.url, syncedTrack.type);
+          }
+          if (!localTrack?.filePath) {
+            throw new Error("A musica nao ficou disponivel para o modo offline.");
+          }
+          await cacheTrack(localTrack);
+        } catch {
+          failures += 1;
+        } finally {
+          setSyncedDownloadBusyKey(null);
+          markCompleted();
+        }
+      }
+
+      if (tracksToPrepare.length) await refreshDownloads();
+      setMessage(
+        failures
+          ? `${saved} musicas salvas offline; ${failures} nao puderam ser baixadas.`
+          : "Playlist disponivel offline neste aparelho."
+      );
+    } finally {
+      setOfflineBusyId(null);
+      setSyncedDownloadBusyKey(null);
+      setOfflinePlaylistProgress(null);
+    }
+  }
+
   function currentMediaUrl() {
     if (currentTrack && playbackMediaUrl) {
       return playbackMediaUrl;
@@ -1065,9 +1228,6 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
   return (
     <main className={`app-shell ${view === "main" ? "home-screen" : ""}`}>
-      <header className="app-header">
-        <img className="app-logo" src="./esporte-fai-logo.png" alt="ESPORTE FAI" />
-      </header>
       {view !== "main" && message && (
         <div className="global-message" role="status">
           {message}
@@ -1097,6 +1257,10 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         <PlayerReturnTab
           track={currentTrack}
           isPlaying={isPlaying}
+          currentTime={currentTime}
+          duration={duration}
+          artwork={queueArtwork}
+          togglePlayback={togglePlayback}
           openPlayer={() => {
             setPreviousView(view);
             setView("player");
@@ -1106,6 +1270,20 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
 
       {view === "main" && (
         <HomeView
+          username={authUser.username}
+          recentTracks={recentTracks}
+          playlists={playlists}
+          playTrack={(track) => startQueue([track], 0, true, "")}
+          openPlaylist={(id) => {
+            setSelectedPlaylistId(id);
+            setView("playlist-detail");
+          }}
+          openSettings={openSettings}
+        />
+      )}
+
+      {view === "search" && (
+        <SearchView
           url={url}
           setUrl={updateUrl}
           validUrl={validUrl}
@@ -1114,6 +1292,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           musicResults={musicResults}
           musicSearchLoading={musicSearchLoading}
           musicSearchError={musicSearchError}
+          recentSearches={recentSearches}
           selectedMusic={selectedMusic}
           runMusicSearch={searchMusicByName}
           selectMusic={selectMusic}
@@ -1125,8 +1304,13 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           message={message}
           startDownload={startDownload}
           playLatest={playLatest}
-          openPlaylists={openPlaylists}
-          openSettings={openSettings}
+          cancelSearch={() => {
+            setMusicSearch("");
+            setMusicResults([]);
+            setMusicSearchError("");
+            setSelectedMusic(null);
+          }}
+          removeRecentSearch={(videoId) => setRecentSearches((current) => current.filter((item) => item.videoId !== videoId))}
         />
       )}
 
@@ -1134,7 +1318,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         <PlaylistsView
           playlists={playlists}
           downloads={completedDownloads}
-          openMain={() => setView("main")}
+          username={authUser.username}
           openPlaylist={(id) => {
             setSelectedPlaylistId(id);
             setView("playlist-detail");
@@ -1157,12 +1341,18 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           search={search}
           setSearch={setSearch}
           back={() => setView("playlists")}
-          playAll={() => startQueue(selectedTracks, 0)}
-          shuffle={() => startQueue([...selectedTracks].sort(() => Math.random() - 0.5), 0)}
-          playTrack={(track) => startQueue(selectedTracks, selectedTracks.findIndex((item) => item.idDownload === track.idDownload))}
+          playAll={() => startQueue(selectedTracks, 0, true, selectedPlaylist.coverImage || "")}
+          shuffle={() => startQueue([...selectedTracks].sort(() => Math.random() - 0.5), 0, true, selectedPlaylist.coverImage || "")}
+          playTrack={(track) => startQueue(selectedTracks, selectedTracks.findIndex((item) => item.idDownload === track.idDownload), true, selectedPlaylist.coverImage || "")}
           currentTrack={currentTrack}
           offlineAudioIds={offlineAudioIds}
           offlineBusyId={offlineBusyId}
+          offlinePlaylistBusy={Boolean(offlinePlaylistProgress)}
+          offlinePlaylistComplete={playlistOfflineComplete}
+          offlinePlaylistProgress={offlinePlaylistProgress}
+          offlinePlaylistTotal={playlistOfflineTotal}
+          offlineSupported={!window.esporteFai}
+          togglePlaylistOffline={togglePlaylistOffline}
           saveAudioOffline={saveAudioOffline}
           removeAudioOffline={removeAudioOffline}
           syncedDownloadBusyKey={syncedDownloadBusyKey}
@@ -1175,6 +1365,7 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
         <div className={view === "player" ? "persistent-player visible" : "persistent-player background"} aria-hidden={view !== "player"}>
           <PlayerView
           track={currentTrack}
+          artwork={queueArtwork}
           isPlaying={isPlaying}
           currentTime={currentTime}
           duration={duration}
@@ -1195,6 +1386,8 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           offlineBusy={currentTrack ? offlineBusyId === currentTrack.idDownload : false}
           saveOffline={() => currentTrack && saveAudioOffline(currentTrack)}
           removeOffline={() => currentTrack && removeAudioOffline(currentTrack)}
+          downloadFile={() => currentTrack && downloadFileToDevice(currentTrack)}
+          fileDownloadBusy={currentTrack ? fileDownloadBusyId === currentTrack.idDownload : false}
           mediaRef={mediaRef}
           mediaUrl={currentMediaUrl()}
           onTimeUpdate={(time) => setCurrentTime(time)}
@@ -1209,8 +1402,11 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
       {view === "settings" && (
         <SettingsView
           username={authUser.username}
-          downloads={downloads}
+          downloads={settingsHistoryDownloads}
           historyLoaded={settingsHistoryLoaded}
+          historyLoading={settingsHistoryLoading}
+          historyError={settingsHistoryError}
+          fullHistory={authUser.username.normalize("NFKC").trim().toLocaleLowerCase("pt-BR") === "tocagando1234"}
           allBlack={allBlack}
           installState={
             appInstalled ? "installed" : installingApp ? "installing" : installPrompt ? "available" : isIOSDevice() ? "ios" : "manual"
@@ -1220,9 +1416,14 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           installApp={installApp}
           closeInstallHelp={() => setInstallHelp(null)}
           loadHistory={loadSettingsHistory}
-          closeHistory={() => setSettingsHistoryLoaded(false)}
+          closeHistory={() => {
+            setSettingsHistoryLoaded(false);
+            setSettingsHistoryError("");
+          }}
           toggleAllBlack={() => setAllBlack((value) => !value)}
-          playTrack={(track) => startQueue([track], 0)}
+          playTrack={(track) => startQueue([track], 0, true, "")}
+          downloadFile={downloadFileToDevice}
+          fileDownloadBusyId={fileDownloadBusyId}
           logout={persistAndLogout}
         />
       )}
@@ -1249,6 +1450,16 @@ function AuthenticatedApp({ authUser, onLogout }: { authUser: AuthUser; onLogout
           setValue={setPlaylistDraft}
           close={() => setShowNewPlaylist(false)}
           confirm={() => createPlaylist(playlistDraft, newPlaylistTrack)}
+        />
+      )}
+
+      {view !== "player" && view !== "settings" && (
+        <BottomNavigation
+          activeView={view === "search" ? "search" : view === "main" ? "main" : "playlists"}
+          navigate={(destination) => {
+            setView(destination);
+            if (destination !== "playlists") setSearch("");
+          }}
         />
       )}
     </main>

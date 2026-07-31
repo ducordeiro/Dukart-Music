@@ -10,6 +10,7 @@ dist-web-server/
 .cache/
 coverage/
 .tmp-media-test/
+.tmp-audit/
 .migration-test/
 migration-data/
 .audit-*/

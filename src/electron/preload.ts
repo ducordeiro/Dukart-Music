@@ -32,6 +32,8 @@ const api = {
   getMediaInfo: (url: string): Promise<MediaInfo> => ipcRenderer.invoke("media:info", url),
   searchMusic: (query: string): Promise<YoutubeSearchResult[]> => ipcRenderer.invoke("music:search", query),
   listDownloads: (): Promise<DownloadRecord[]> => ipcRenderer.invoke("downloads:list"),
+  listDownloadHistory: (): Promise<DownloadRecord[]> => ipcRenderer.invoke("downloads:history"),
+  downloadFile: (record: DownloadRecord): Promise<boolean> => ipcRenderer.invoke("files:save-copy", record),
   findCompleted: (url: string, type?: DownloadType): Promise<DownloadRecord | null> =>
     ipcRenderer.invoke("downloads:completed", url, type),
   startDownload: (url: string, type: DownloadType): Promise<{ idDownload: number; filePath: string }> =>

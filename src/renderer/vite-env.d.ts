@@ -28,6 +28,8 @@ interface EsporteFaiApi {
   getMediaInfo: (url: string) => Promise<MediaInfo>;
   searchMusic: (query: string) => Promise<YoutubeSearchResult[]>;
   listDownloads: () => Promise<DownloadRecord[]>;
+  listDownloadHistory: () => Promise<DownloadRecord[]>;
+  downloadFile: (record: DownloadRecord) => Promise<boolean>;
   findCompleted: (url: string, type?: DownloadType) => Promise<DownloadRecord | null>;
   startDownload: (url: string, type: DownloadType) => Promise<{ idDownload: number; filePath: string }>;
   playFile: (filePath: string) => Promise<boolean>;
