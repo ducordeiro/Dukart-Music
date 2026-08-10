@@ -1,6 +1,14 @@
-const APP_CACHE = "esporte-fai-app-v8";
+const APP_CACHE = "esporte-fai-app-v9";
 const MEDIA_CACHE = "esporte-fai-media-v1";
-const APP_SHELL = ["/", "/manifest.json", "/esporte-fai-logo.png", "/icons/icon-192.png", "/icons/icon-512.png"];
+const APP_SHELL = [
+  "/",
+  "/manifest.json",
+  "/esporte-fai-logo.png",
+  "/fonts/Midstar_Personal_Use.otf",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
+  "/icons/icon-maskable-512.png"
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(prepareAppShell());

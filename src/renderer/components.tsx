@@ -70,11 +70,11 @@ function HomeView({
   return (
     <section className="home-view" aria-labelledby="home-greeting">
       <header className="home-header">
-        <img className="home-logo" src="./esporte-fai-logo.png" alt="Esporte Fai" />
         <div className="home-greeting">
           <span id="home-greeting">{greeting}</span>
           <strong>@{username}</strong>
         </div>
+        <div className="home-brand" aria-label="Dukart">Dukart</div>
         <button className="avatar-button pressable" type="button" onClick={openSettings} title="Abrir configurações" aria-label="Abrir configurações">
           {username.slice(0, 1).toUpperCase()}
         </button>
