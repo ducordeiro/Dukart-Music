@@ -1,8 +1,8 @@
 {
-  "name": "esporte-fai",
+  "name": "dukart-music",
   "version": "0.1.0",
   "private": true,
-  "description": "Esporte fai desktop app for YouTube audio and video downloads.",
+  "description": "Dukart Music desktop app for YouTube audio and video downloads.",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 ESPORTE_FAI_API_URL=https://e.duk4rt.com electron .\"",

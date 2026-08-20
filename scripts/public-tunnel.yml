@@ -2,11 +2,11 @@ tunnel: a3720047-70dc-482e-bfc4-47a886a80b20
 credentials-file: C:/Users/gesso/.cloudflared/a3720047-70dc-482e-bfc4-47a886a80b20.json
 ingress:
   - hostname: e.duk4rt.com
-    service: http://127.0.0.1:3001
+    service: http://127.0.0.1:3002
     originRequest:
       connectTimeout: 10s
   - hostname: duk4rt.com
-    service: http://127.0.0.1:3001
+    service: http://127.0.0.1:3002
     originRequest:
       connectTimeout: 10s
   - service: http_status:404

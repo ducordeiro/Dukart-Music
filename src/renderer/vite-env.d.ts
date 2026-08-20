@@ -32,6 +32,7 @@ interface EsporteFaiApi {
   downloadFile: (record: DownloadRecord) => Promise<boolean>;
   findCompleted: (url: string, type?: DownloadType) => Promise<DownloadRecord | null>;
   startDownload: (url: string, type: DownloadType) => Promise<{ idDownload: number; filePath: string }>;
+  cancelDownload: (idDownload: number) => Promise<boolean>;
   playFile: (filePath: string) => Promise<boolean>;
   onProgress: (callback: (payload: ProgressPayload) => void) => () => void;
 }

@@ -1,5 +1,5 @@
 param(
-  [int]$Port = 3000
+  [int]$Port = 3002
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
   throw "npm.cmd não foi encontrado. Reinstale o Node.js antes de continuar."
 }
 
-Write-Host "== Esporte Fai: atualização web =="
+Write-Host "== Dukart Music: atualização web =="
 Write-Host "Projeto: $ProjectRoot"
 Write-Host "Porta: $Port"
 
@@ -52,7 +52,7 @@ $PreviousServerIds = @(Get-ListeningProcessIds)
 foreach ($ProcessId in $PreviousServerIds) {
   $Process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
   if ($Process -and $Process.ProcessName -ne "node") {
-    throw "A porta $Port está sendo usada por $($Process.ProcessName), não pelo Esporte Fai. Nada foi encerrado."
+    throw "A porta $Port está sendo usada por $($Process.ProcessName), não pelo Dukart Music. Nada foi encerrado."
   }
   if ($Process) {
     Write-Host "Encerrando servidor anterior (PID $($Process.Id))..."
@@ -74,6 +74,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $env:PORT = [string]$Port
+$ServerTools = Join-Path $ProjectRoot ".server-tools"
+$YtDlpPluginDirectory = Join-Path $ServerTools "yt-dlp-plugins"
+$YtDlpProviderHome = Join-Path $ServerTools "bgutil-ytdlp-pot-provider\server"
+$YtDlpProviderScript = Join-Path $YtDlpProviderHome "build\generate_once.js"
+if ((Test-Path $YtDlpPluginDirectory) -and (Test-Path $YtDlpProviderScript)) {
+  if (-not $env:ESPORTE_FAI_YTDLP_PLUGIN_DIR) { $env:ESPORTE_FAI_YTDLP_PLUGIN_DIR = $YtDlpPluginDirectory }
+  if (-not $env:ESPORTE_FAI_YTDLP_PROVIDER_HOME) { $env:ESPORTE_FAI_YTDLP_PROVIDER_HOME = $YtDlpProviderHome }
+  if (-not $env:ESPORTE_FAI_YOUTUBE_PLAYER_CLIENT) { $env:ESPORTE_FAI_YOUTUBE_PLAYER_CLIENT = "web_embedded" }
+}
 Write-Host "Iniciando o servidor em segundo plano..."
 
 # Alguns terminais iniciados por aplicativos mantêm Path e PATH ao mesmo

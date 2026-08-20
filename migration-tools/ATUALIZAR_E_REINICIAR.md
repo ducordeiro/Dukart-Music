@@ -1,12 +1,12 @@
-# Atualizar e reiniciar o Esporte Fai
+# Atualizar e reiniciar o Dukart Music
 
 Este procedimento recompila a interface web e reinicia somente o servidor do
-Esporte Fai na porta 3000. O banco, as músicas e as configurações não são
+Dukart Music na porta 3002. O banco, as músicas e as configurações não são
 apagados.
 
 ## Método mais fácil
 
-1. Abra a pasta do Esporte Fai no Explorador de Arquivos.
+1. Abra a pasta do Dukart Music no Explorador de Arquivos.
 2. Entre na pasta `migration-tools`.
 3. Clique com o botão direito em uma área vazia e escolha **Abrir no Terminal**.
 4. Execute:

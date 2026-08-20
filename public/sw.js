@@ -1,4 +1,4 @@
-const APP_CACHE = "esporte-fai-app-v9";
+const APP_CACHE = "esporte-fai-app-v13";
 const MEDIA_CACHE = "esporte-fai-media-v1";
 const APP_SHELL = [
   "/",

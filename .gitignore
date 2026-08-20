@@ -32,4 +32,5 @@ migration-data/
 *.pfx
 central-session.bin
 .cloudflared/
+.server-tools/
 logs/

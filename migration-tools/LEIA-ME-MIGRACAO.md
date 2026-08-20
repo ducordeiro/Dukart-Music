@@ -1,4 +1,4 @@
-# Migracao do Esporte Fai para outro computador
+# Migração do Dukart Music para outro computador
 
 Este pacote foi preparado para levar o app para um novo computador que vai funcionar como servidor.
 

@@ -66,7 +66,7 @@ export function AuthView({ onAuthenticated }: { onAuthenticated: (user: AuthUser
   return (
     <main className="auth-shell">
       <section className={`auth-card ${mode}`} aria-labelledby="auth-title">
-        {mode === "register" && <img className="auth-logo" src="./esporte-fai-logo.png" alt="Esporte Fai" />}
+        {mode === "register" && <img className="auth-logo" src="./esporte-fai-logo.png" alt="Dukart Music" />}
         <h1 id="auth-title">{mode === "login" ? "Acessar o melhor app do Capão Redondo" : "Vamos criar uma conta"}</h1>
 
         <form className="auth-form" onSubmit={submit} noValidate>

@@ -16,7 +16,7 @@ $MusicTarget = Join-Path ([Environment]::GetFolderPath("MyMusic")) "Esporte fai"
 
 Set-Location $ProjectRoot
 
-Write-Host "== Esporte Fai: restauracao do servidor =="
+Write-Host "== Dukart Music: restauracao do servidor =="
 Write-Host "Projeto: $ProjectRoot"
 Write-Host "Banco destino: $DbTarget"
 Write-Host "Musicas destino: $MusicTarget"
